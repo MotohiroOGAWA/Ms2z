@@ -1,6 +1,4 @@
 from model.utils import *
-from model.stats_utils import *
-from model.vocab import *
 
 from collections import Counter
 from tqdm import tqdm
@@ -27,7 +25,7 @@ def main(args):
             for i in pbar:
                 try:
                     mol = Chem.MolFromSmiles(all_smiles[i])
-                    mol = sanitize(mol, kekulize = False)
+                    mol, atom_oder = sanitize(mol, kekulize = False)
                     mol = Chem.RemoveHs(mol)
                     mols.append(mol)
 
