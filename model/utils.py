@@ -1,11 +1,12 @@
 from rdkit import Chem
 import dill
 from bidict import bidict
+import copy
 
 
 bond_priority = bidict({'-': 0, '=': 1, '#': 2, ':': 3})
 
-def read_smiles(file_path, binary = None):
+def read_smiles(file_path, binary = None, split_smi = True):
     if binary is None:
         if file_path.endswith('.pkl'):
             binary = True
@@ -21,7 +22,10 @@ def read_smiles(file_path, binary = None):
             smiles = [Chem.MolToSmiles(mol) for mol in suppl]
 
         with open(file_path, 'r') as f:
-            smiles = [line.strip("\r\n ").split()[0] for line in f]
+            if split_smi:
+                smiles = [s.strip() for line in f for s in line.strip("\r\n ").split('.')]
+            else:
+                smiles = [line.strip("\r\n ").split()[0] for line in f]
             
     return smiles
 
@@ -61,15 +65,40 @@ def get_mol(smiles):
 def get_smiles(mol):
     return Chem.MolToSmiles(mol, kekuleSmiles = True)
 
-# #Mol->Mol (Error->None)
-# def sanitize(mol, kekulize = True):
-#     try:
-#         smiles = get_smiles(mol) if kekulize else Chem.MolToSmiles(mol)
-#         mol = get_mol(smiles) if kekulize else Chem.MolFromSmiles(smiles)
-#     except:
-#         mol = None
-#     return mol
+#Mol->Mol (Error->None)
+def sanitize(mol, kekulize = True):
+    try:
+        smiles = get_smiles(mol) if kekulize else Chem.MolToSmiles(mol)
+        mol = get_mol(smiles) if kekulize else Chem.MolFromSmiles(smiles)
+    except:
+        mol = None
+    return mol
 
+def chem_bond_to_token(bond_type):
+    if bond_type == Chem.BondType.SINGLE:
+        bonding_type = "-"
+    elif bond_type == Chem.BondType.DOUBLE:
+        bonding_type = "="
+    elif bond_type == Chem.BondType.TRIPLE:
+        bonding_type = "#"
+    elif bond_type == Chem.BondType.AROMATIC:
+        bonding_type = ':'
+    else:
+        raise ValueError("Invalid bond type.")
+    return bonding_type
+
+def token_to_chem_bond(token):
+    if token == "-":
+        bond_type = Chem.BondType.SINGLE
+    elif token == "=":
+        bond_type = Chem.BondType.DOUBLE
+    elif token == "#":
+        bond_type = Chem.BondType.TRIPLE
+    elif token == ":":
+        bond_type = Chem.BondType.AROMATIC
+    else:
+        raise ValueError("Invalid bond token.")
+    return bond_type
 
 
 def get_atom_symbol(atom):
@@ -136,7 +165,248 @@ def get_atom_order(mol):
     Raises:
         KeyError: If the molecule does not have the "_smilesAtomOutputOrder" property.
     """
+    # smiles = Chem.MolToSmiles(mol, canonical=True)
     smiles = Chem.MolToSmiles(mol, canonical=True)
     atom_order = list(map(int, mol.GetProp("_smilesAtomOutputOrder")[1:-2].split(",")))
-    mol = Chem.MolFromSmiles(smiles)
+    mol = Chem.MolFromSmiles(smiles, sanitize=False)
     return mol, smiles, atom_order
+
+
+def add_atom(rwmol, atom, new_atom, bond_type):
+    if str(bond_type) == 'SINGLE':
+        num = 1
+    elif str(bond_type) == 'DOUBLE':
+        num = 2
+    elif str(bond_type) == 'TRIPLE':
+        num = 3
+    elif str(bond_type) == 'AROMATIC':
+        # print("error in add_Hs 1")
+        return rwmol
+    else:
+        print("error in add_Hs 2")
+    
+    new_atom_idx = rwmol.AddAtom(new_atom)
+    rwmol.AddBond(atom.GetIdx(), new_atom_idx, bond_type)
+    explicit_hs = atom.GetNumExplicitHs()
+    rwmol = Chem.RWMol(Chem.AddHs(rwmol))
+    atom_idx2 = [atom2.GetIdx() for atom2 in rwmol.GetAtoms() if atom.GetAtomMapNum() == atom2.GetAtomMapNum()][0]
+
+    h_atoms = [neighbor for neighbor in rwmol.GetAtomWithIdx(atom_idx2).GetNeighbors() if neighbor.GetSymbol() == 'H']
+    # for i in range(min(num, explicit_hs)):
+    for i in range(min(num, len(h_atoms))):
+        rwmol.RemoveAtom(h_atoms[i].GetIdx())
+    
+    aromatic_flags = {
+        "atoms": {
+            atom.GetAtomMapNum(): atom.GetIsAromatic() for atom in rwmol.GetAtoms()
+        },
+        "bonds": {
+            (bond.GetBeginAtom().GetAtomMapNum(), bond.GetEndAtom().GetAtomMapNum()): {
+                "is_aromatic": bond.GetIsAromatic(),
+                "bond_type": bond.GetBondType(),
+            }
+            for bond in rwmol.GetBonds()
+        },
+    }
+
+    # Convert RWMol to a molecule without explicit hydrogens
+    rwmol = Chem.RWMol(Chem.RemoveHs(rwmol))
+    
+    # Restore aromaticity and bond types
+    for atom in rwmol.GetAtoms():
+        # Use AtomMapNum if available, otherwise fall back to index
+        key = atom.GetAtomMapNum() if atom.GetAtomMapNum() > 0 else atom.GetIdx()
+        if key in aromatic_flags["atoms"]:
+            atom.SetIsAromatic(aromatic_flags["atoms"][key])
+
+    for bond in rwmol.GetBonds():
+        # Use indices as bond keys
+        begin_idx = bond.GetBeginAtom().GetAtomMapNum()
+        end_idx = bond.GetEndAtom().GetAtomMapNum()
+        bond_key = (begin_idx, end_idx)
+        reverse_bond_key = (end_idx, begin_idx)  # Handle reversed bond keys
+        
+        # Restore bond properties
+        if bond_key in aromatic_flags["bonds"]:
+            bond_data = aromatic_flags["bonds"][bond_key]
+        elif reverse_bond_key in aromatic_flags["bonds"]:
+            bond_data = aromatic_flags["bonds"][reverse_bond_key]
+        else:
+            continue
+        bond.SetBondType(bond_data["bond_type"])
+        bond.SetIsAromatic(bond_data["is_aromatic"])
+    
+    return rwmol
+
+def remove_atom(rwmol, removed_atom, neighbor_atom, bond_type):
+    if str(bond_type) == 'SINGLE':
+        num = 1
+    elif str(bond_type) == 'DOUBLE':
+        num = 2
+    elif str(bond_type) == 'TRIPLE':
+        num = 3
+    elif str(bond_type) == 'AROMATIC':
+        # print("error in add_Hs 1")
+        return rwmol
+    else:
+        print("error in add_Hs 2")
+
+    aromatic_flags = {
+        "atoms": {
+            atom.GetAtomMapNum(): atom.GetIsAromatic() for atom in rwmol.GetAtoms()
+        },
+        "bonds": {
+            (bond.GetBeginAtom().GetAtomMapNum(), bond.GetEndAtom().GetAtomMapNum()): {
+                "is_aromatic": bond.GetIsAromatic(),
+                "bond_type": bond.GetBondType(),
+            }
+            for bond in rwmol.GetBonds()
+        },
+    }
+
+    rwmol.RemoveBond(removed_atom.GetIdx(), neighbor_atom.GetIdx())
+    rwmol.RemoveAtom(removed_atom.GetIdx())
+
+    for i in range(num):
+        new_idx = rwmol.AddAtom(Chem.Atom(1))
+        rwmol.GetAtomWithIdx(new_idx).SetAtomMapNum(0)
+        rwmol.AddBond(new_idx, neighbor_atom.GetIdx(), Chem.BondType.SINGLE)
+
+    # Restore aromaticity and bond types
+    for atom in rwmol.GetAtoms():
+        # Use AtomMapNum if available, otherwise fall back to index
+        key = atom.GetAtomMapNum() if atom.GetAtomMapNum() > 0 else atom.GetAtomMapNum()
+        if key in aromatic_flags["atoms"]:
+            atom.SetIsAromatic(aromatic_flags["atoms"][key])
+
+    for bond in rwmol.GetBonds():
+        # Use indices as bond keys
+        begin_idx = bond.GetBeginAtom().GetAtomMapNum()
+        end_idx = bond.GetEndAtom().GetAtomMapNum()
+        bond_key = (begin_idx, end_idx)
+        reverse_bond_key = (end_idx, begin_idx)  # Handle reversed bond keys
+        
+        # Restore bond properties
+        if bond_key in aromatic_flags["bonds"]:
+            bond_data = aromatic_flags["bonds"][bond_key]
+        elif reverse_bond_key in aromatic_flags["bonds"]:
+            bond_data = aromatic_flags["bonds"][reverse_bond_key]
+        else:
+            continue
+        bond.SetBondType(bond_data["bond_type"])
+        bond.SetIsAromatic(bond_data["is_aromatic"])
+
+    rwmol = Chem.RWMol(Chem.RemoveHs(rwmol))
+
+    # Restore aromaticity and bond types
+    for atom in rwmol.GetAtoms():
+        # Use AtomMapNum if available, otherwise fall back to index
+        key = atom.GetAtomMapNum() if atom.GetAtomMapNum() > 0 else atom.GetAtomMapNum()
+        if key in aromatic_flags["atoms"]:
+            atom.SetIsAromatic(aromatic_flags["atoms"][key])
+
+    for bond in rwmol.GetBonds():
+        # Use indices as bond keys
+        begin_idx = bond.GetBeginAtom().GetAtomMapNum()
+        end_idx = bond.GetEndAtom().GetAtomMapNum()
+        bond_key = (begin_idx, end_idx)
+        reverse_bond_key = (end_idx, begin_idx)  # Handle reversed bond keys
+        
+        # Restore bond properties
+        if bond_key in aromatic_flags["bonds"]:
+            bond_data = aromatic_flags["bonds"][bond_key]
+        elif reverse_bond_key in aromatic_flags["bonds"]:
+            bond_data = aromatic_flags["bonds"][reverse_bond_key]
+        else:
+            continue
+        bond.SetBondType(bond_data["bond_type"])
+        bond.SetIsAromatic(bond_data["is_aromatic"])
+
+    return rwmol
+
+
+#Valence adjustment by hydrogen addition after decomposition
+def add_Hs(rwmol, a1, a2, bond):
+    if str(bond.GetBondType()) == 'SINGLE':
+        num = 1
+    elif str(bond.GetBondType()) == 'DOUBLE':
+        num = 2
+    elif str(bond.GetBondType()) == 'TRIPLE':
+        num = 3
+    elif str(bond.GetBondType()) == 'AROMATIC':
+        # print("error in add_Hs 1")
+        return rwmol
+    else:
+        print("error in add_Hs 2")
+        
+    for i in range(num):
+        new_idx = rwmol.AddAtom(Chem.Atom(1))
+        rwmol.GetAtomWithIdx(new_idx).SetAtomMapNum(0)
+        rwmol.AddBond(new_idx, a1.GetIdx(), Chem.BondType.SINGLE)
+        if a2 != None:
+            new_idx = rwmol.AddAtom(Chem.Atom(1))
+            rwmol.GetAtomWithIdx(new_idx).SetAtomMapNum(0)
+            rwmol.AddBond(new_idx, a2.GetIdx(), Chem.BondType.SINGLE)
+    return rwmol
+
+def remove_Hs(rwmol, a1, a2, bond_type):
+    try:
+        if str(bond_type) == 'SINGLE':
+            num = 1
+        elif str(bond_type) == 'DOUBLE':
+            num = 2
+        elif str(bond_type) == 'TRIPLE':
+            num = 3
+        elif str(bond_type) == 'AROMATIC':
+            print("error in remove_Hs 1")
+        else:
+            print("error in remove_Hs 2")
+    except:
+        if bond_type == 0:
+            num = 1
+        elif bond_type == 1:
+            num = 2
+        elif bond_type == 2:
+            num = 3
+        else:
+            raise
+    rwmol = Chem.AddHs(rwmol)
+    rwmol = Chem.RWMol(rwmol)
+    #Set hydrogen maps for connected atoms
+    h_map1 = 2000000
+    h_map2 = 3000000
+    f_h_map1 = copy.copy(h_map1)
+    f_h_map2 = copy.copy(h_map2)
+    for b in rwmol.GetBonds():
+        s_atom = b.GetBeginAtom()
+        e_atom = b.GetEndAtom()
+        if (e_atom.GetIdx() == a1.GetIdx()) and (s_atom.GetSymbol() == 'H'):
+            s_atom.SetAtomMapNum(h_map1)
+            h_map1 += 1
+        elif (s_atom.GetIdx() == a1.GetIdx()) and (e_atom.GetSymbol() == 'H'):
+            e_atom.SetAtomMapNum(h_map1)
+            h_map1 += 1
+        elif (e_atom.GetIdx() == a2.GetIdx()) and (s_atom.GetSymbol() == 'H'):
+            s_atom.SetAtomMapNum(h_map2)
+            h_map2 += 1
+        elif (s_atom.GetIdx() == a2.GetIdx()) and (e_atom.GetSymbol() == 'H'):
+            e_atom.SetAtomMapNum(h_map2)
+            h_map2 += 1
+    for i in range(num):
+        try:
+            for atom in rwmol.GetAtoms():
+                if atom.GetAtomMapNum() == f_h_map1 + i:
+                    rwmol.RemoveAtom(atom.GetIdx())
+                    break
+            for atom in rwmol.GetAtoms():
+                if atom.GetAtomMapNum() == f_h_map2 + i:
+                    rwmol.RemoveAtom(atom.GetIdx())
+                    break
+        except:
+            print("Remove Hs times Error!!")
+            raise
+    rwmol = rwmol.GetMol()
+    rwmol = sanitize(rwmol, kekulize = False)
+    rwmol = Chem.RemoveHs(rwmol)
+    rwmol = Chem.RWMol(rwmol)
+    return rwmol
