@@ -1,6 +1,7 @@
 from collections import defaultdict
+import copy
 
-from .fragment import Fragment
+from .fragment import Fragment, FragBondList, FragmentBond
 
 class FragmentGroup:
     def __init__(self, fragments:list[Fragment]):
@@ -32,7 +33,11 @@ class FragmentGroup:
         return self.fragments[key]
     
     def get_bond_between(self, frag_idx1, bond_pos1, frag_idx2, bond_pos2):
-        return self.fragments[frag_idx1].get_bond_between(bond_pos1, self.fragments[frag_idx2], bond_pos2)
+        bond_token1 = self.fragments[frag_idx1].bond_list[bond_pos1].token
+        bond_token2 = self.fragments[frag_idx2].bond_list[bond_pos2].token
+        if bond_token1 != bond_token2:
+            raise ValueError(f"Bond tokens do not match: {bond_pos1} of {self.fragments[frag_idx1]} != {bond_pos2} of {self.fragments[frag_idx2]}")
+        return copy.deepcopy(self.fragments[frag_idx1].bond_list[bond_pos1])
 
     def set_bond_pair(self, bond_pair):
         """

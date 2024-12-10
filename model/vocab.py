@@ -1,5 +1,5 @@
 import dill
-from collections import Counter
+from collections import Counter, defaultdict
 import bidict
 import torch
 
@@ -25,20 +25,22 @@ class Vocab:
                 fragment_counter = Counter(fragment_counter)
 
         # get the vocab
-        self.vocab = set([tuple(frag) for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens])
+        vocab_dict = {tuple(frag): frag for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
+        # self.vocab = set([tuple(frag) for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens])
         for frag_strings, cnt in fragment_counter.items():
             if cnt >= threshold:
                 fragment = Fragment.parse_fragment_string(frag_strings)
                 if fragment.mol is not None:
-                    self.vocab.add(tuple(fragment))
+                    # self.vocab.add(tuple(fragment))
+                    vocab_dict[tuple(fragment)] = fragment
                 # else:
                 #     print(f"Invalid fragment: {frag_strings}")
         # self.vocab.update([tuple(Fragment.parse_fragment_string(frag_strings)) for frag_strings, cnt in fragment_counter.items() if cnt >= threshold])
 
-        self.vocab = bidict({v:i for i, v in enumerate(self.vocab)})
+        self.vocab = bidict({v:i for i, v in enumerate(vocab_dict.keys())})
 
         self.tree = FragmentTree()
-        self.tree.add_fragment_list(self.vocab.keys())
+        self.tree.add_fragment_list(vocab_dict.values())
         
         self.fragmentizer = Fragmentizer()
 
@@ -100,23 +102,23 @@ class Vocab:
                     start_atom_idx = atom_mapping.index(max_atom_score_idx)
                 else:
                     start_atom_idx = None
-                result =  self.tree.search(tuple(fragment), s_bond_idx, start_atom_idx=start_atom_idx)
+                result =  self.tree.search(fragment, s_bond_idx, start_atom_idx=start_atom_idx)
                 if result is None:
                     return None
                 root_next, sub_vocab_list, local_atom_map = result
                 current_bond_pos = root_next[2][1]
                 merge_bond_poses = []
                 for sub_vocab_idx, sub_vocab in enumerate(sub_vocab_list):
-                    tmp_frag_info = sub_vocab['frag']
-                    if tmp_frag_info not in frag_to_idx:
-                        frag_to_idx[tmp_frag_info] = self.vocab.get(tmp_frag_info, -1)
-                    sub_vocab['idx'] = frag_to_idx[tmp_frag_info]
+                    tmp_frag = sub_vocab['frag']
+                    if tuple(tmp_frag) not in frag_to_idx:
+                        frag_to_idx[tuple(tmp_frag)] = self.vocab.get(tuple(tmp_frag), -1)
+                    sub_vocab['idx'] = frag_to_idx[tuple(tmp_frag)]
 
                     for i, next_v in enumerate(sub_vocab['next']):
                         sub_vocab['next'][i] = (next_v[0], next_v[1], (next_v[2][0] + current_frag_idx, next_v[2][1]))
 
-                    for i, (atom_idx, bond_type) in enumerate(zip(tmp_frag_info[1::2], tmp_frag_info[2::2])):
-                        merge_bond_poses.append((sub_vocab_idx, i))
+                    for frag_bond in tmp_frag.bond_list:
+                        merge_bond_poses.append((sub_vocab_idx, frag_bond.id))
 
                     vocab_list.append(sub_vocab)
                 if root_next[2][1] != -1:
@@ -127,21 +129,27 @@ class Vocab:
                             merge_bond_poses.remove((next_v[2][0] - current_frag_idx, next_v[2][1]))
                     
                 next_atom_infoes = []
+                tmp = defaultdict(list)
                 for i, (sub_vocab_idx, bond_pos) in enumerate(merge_bond_poses):
-                    atom_idx = local_atom_map.inv[(sub_vocab_idx, sub_vocab_list[sub_vocab_idx]['frag'][1::2][bond_pos])]
-                    bond_type = sub_vocab_list[sub_vocab_idx]['frag'][2::2][bond_pos]
+                    atom_idx = local_atom_map.inv[(sub_vocab_idx, sub_vocab_list[sub_vocab_idx]['frag'].bond_list[bond_pos].atom_idx)]
+                    bond_token = sub_vocab_list[sub_vocab_idx]['frag'].bond_list[bond_pos].token
 
                     vocab_idx = sub_vocab_idx+current_frag_idx
-                    next_frag_idx, next_bond_pos = fragment_group.get_neighbor(frag_idx, bond_pos)
-                    bond_token = fragment_group.bond_token_between(frag_idx, bond_pos, next_frag_idx, next_bond_pos)
+                    tmp[(atom_idx, bond_token)].append((vocab_idx, bond_pos))
+                
+                for frag_bond in fragment.bond_list:
+                    if frag_bond.id == s_bond_idx:
+                        continue
+                    vocab_idx, bond_pos = tmp[(fragment.atom_map[frag_bond.atom_idx], frag_bond.token)].pop(0)
+                    next_frag_idx, next_bond_pos = fragment_group.get_neighbor(frag_idx, frag_bond.id)
 
-                    next_atom_infoes.append(((sub_vocab_idx+current_frag_idx, bond_pos), bond_token, (next_frag_idx, next_bond_pos)))
+                    next_atom_infoes.append(((vocab_idx, bond_pos), bond_token, (next_frag_idx, next_bond_pos)))
                 
                 current_frag_idx += len(sub_vocab_list) - 1
 
-                for (vocab_idx, bond_pos), bond_type, (next_frag_idx, next_bond_pos) in next_atom_infoes:
+                for (vocab_idx, bond_pos), bond_token, (next_frag_idx, next_bond_pos) in next_atom_infoes:
                     next_frag_idx, next_bond_pos = dfs(parent_info=(vocab_idx, bond_pos), start_bond_info=(next_frag_idx, next_bond_pos))
-                    vocab_list[vocab_idx]['next'].append((bond_pos, bond_type, (next_frag_idx, next_bond_pos)))
+                    vocab_list[vocab_idx]['next'].append((bond_pos, bond_token, (next_frag_idx, next_bond_pos)))
                     
             else:
                 vocab_list.append({'frag': tuple(fragment), 'idx': vocab_idx, 'next': []})
@@ -206,8 +214,9 @@ class Vocab:
             
             # ノードのデータ構造
             frag_info = self.vocab.inv[vocab_idx]
+            frag = Fragment.from_tuple(frag_info)
             node = {
-                'frag': frag_info,  # frag のデータは復元できないため外部情報が必要
+                'frag': frag, 
                 'idx': vocab_idx,
                 'next': []
             }
@@ -215,7 +224,7 @@ class Vocab:
 
             # 親ノードに 'next' 情報を追加
             if parent_idx >= 0:
-                vocab_tree[parent_idx]['next'].append((parent_bond_pos, frag_info[2*bond_pos+2], (idx.item(), bond_pos)))
+                vocab_tree[parent_idx]['next'].append((parent_bond_pos, frag.bond_list[bond_pos].token, (idx.item(), bond_pos)))
 
         # 再構築された vocab_tree を返す
         mol = self.vocab_tree_to_mol(vocab_tree)
@@ -223,17 +232,17 @@ class Vocab:
 
     def vocab_tree_to_mol(self, vocab_tree):
         merge_bond_poses = []
-        frag_infoes = []
+        fragments = []
         for frag_id1, vocab in enumerate(vocab_tree):
             for next_info in vocab['next']:
                 bond_pos1, bond_type, (frag_id2, bond_pos2) = next_info
                 merge_bond_poses.append(((frag_id1, bond_pos1), bond_type, (frag_id2, bond_pos2)))
-            frag_infoes.append(vocab['frag'])
+            fragments.append(vocab['frag'])
         
-        merged_frag_info, _ =  merge_fragment_info(frag_infoes, merge_bond_poses)
+        merged_frag =  merge_fragment_info(fragments, merge_bond_poses)
 
         # 分子を正規化して返す
-        mol = Chem.MolFromSmiles(merged_frag_info[0])
+        mol = Chem.MolFromSmiles(merged_frag.smiles)
         return mol
 
 def calculate_advanced_scores(smiles_or_mol: str, sort=False):
@@ -292,7 +301,7 @@ def calculate_advanced_scores(smiles_or_mol: str, sort=False):
     return scores
 
 
-def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
+def merge_fragment_info(fragments: list[Fragment], merge_bond_poses, atom_id_list = None):
     """
     Merge multiple molecular fragments into a single molecule by combining and bonding them.
     
@@ -318,7 +327,7 @@ def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
     """
 
     # Convert SMILES to RDKit molecules for each fragment
-    mols = [Chem.MolFromSmiles(frag_info[0]) for frag_info in frag_infoes]
+    mols = [Chem.MolFromSmiles(frag.smiles) for frag in fragments]
 
     # If no atom_id_list is provided, use default atom indices for each fragment
     if atom_id_list is None:
@@ -327,14 +336,14 @@ def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
     # Initialize atom mapping and remaining bond positions
     atom_map = bidict()
     remaining_bond_poses = []
-    offset = 0
+    offset = 1
 
     # Combine molecules and assign atom map numbers
     for i, mol in enumerate(mols):
         for atom in mol.GetAtoms():
             atom_idx = atom.GetIdx()
             atom.SetAtomMapNum(atom_idx + offset)  # Assign unique atom map numbers
-            atom_map[atom.GetIdx() + offset] = (i, atom_idx)
+            atom_map[atom_idx + offset] = (i, atom_idx)
             
         if i == 0:
             combined_mol = copy.deepcopy(mol)  # Start with the first fragment
@@ -342,20 +351,20 @@ def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
             combined_mol = Chem.CombineMols(combined_mol, mol)  # Add subsequent fragments
 
         # Track remaining bonds in the fragment
-        for j in range((len(frag_infoes[i]) - 1) // 2):
-            remaining_bond_poses.append((i, j))
+        for frag_bond in fragments[i].bond_list:
+            remaining_bond_poses.append((i, frag_bond.id))
         offset += mol.GetNumAtoms()  # Update offset for the next fragment
 
     # Convert the combined molecule to an editable RWMol
     combined_rwmol = Chem.RWMol(combined_mol)
 
     # Add specified bonds between fragments
-    for i, (joint_pos1, bond_type, joint_pos2) in enumerate(merge_bond_poses):
+    for i, (joint_pos1, bond_token, joint_pos2) in enumerate(merge_bond_poses):
         frag_idx1, bond_pos1 = joint_pos1
-        map_number1 = atom_map.inv[(frag_idx1, frag_infoes[frag_idx1][2 * bond_pos1 + 1])]
+        map_number1 = atom_map.inv[(frag_idx1, fragments[frag_idx1].bond_list[bond_pos1].atom_idx)]
 
         frag_idx2, bond_pos2 = joint_pos2
-        map_number2 = atom_map.inv[(frag_idx2, frag_infoes[frag_idx2][2 * bond_pos2 + 1])]
+        map_number2 = atom_map.inv[(frag_idx2, fragments[frag_idx2].bond_list[bond_pos2].atom_idx)]
 
         # Find atom indices by map number
         atom_idx1 = next(atom.GetIdx() for atom in combined_rwmol.GetAtoms() if atom.GetAtomMapNum() == map_number1)
@@ -363,7 +372,7 @@ def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
 
         atom1 = combined_rwmol.GetAtomWithIdx(atom_idx1)
         atom2 = combined_rwmol.GetAtomWithIdx(atom_idx2)
-        bond_type = token_to_chem_bond(bond_type)  # Convert bond type to RDKit format
+        bond_type = token_to_chem_bond(bond_token)  # Convert bond type to RDKit format
         combined_rwmol.AddBond(atom_idx1, atom_idx2, bond_type)  # Add bond
         combined_rwmol = remove_Hs(combined_rwmol, atom1, atom2, bond_type)  # Remove hydrogens
         remaining_bond_poses.remove((frag_idx1, bond_pos1))
@@ -371,7 +380,7 @@ def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
 
     # Generate the final combined molecule and SMILES
     combined_mol = combined_rwmol.GetMol()
-    atom_map2 = bidict()
+    atom_map2 = bidict() # combined_order -> (frag_idx, pre_atom_idx)
     for i, atom in enumerate(combined_mol.GetAtoms()):
         atom_map2[i] = atom_map[atom.GetAtomMapNum()]
     for atom in combined_mol.GetAtoms():
@@ -383,31 +392,15 @@ def merge_fragment_info(frag_infoes, merge_bond_poses, atom_id_list = None):
 
     new_atom_maps = bidict({i: atom_map2[order] for i, order in enumerate(atom_order)})
 
-    # Map new atom indices to original fragments and atom IDs
-    # new_atom_maps = bidict()
-    # for i, pre_atom_idx in enumerate(atom_order):
-    #     frag_idx, atom_idx = atom_map[pre_atom_idx]
-    #     new_atom_maps[i] = (frag_idx, atom_id_list[frag_idx][atom_idx])
-
     # Collect remaining bond information
-    bond_infoes = []
+    # (frag_idx, atom_idx) -> atom_map_num
+    bond_list = []
     for frag_idx, bond_pos in remaining_bond_poses:
-        atom_idx = frag_infoes[frag_idx][2 * bond_pos + 1]
-        bond_type = frag_infoes[frag_idx][2 * bond_pos + 2]
-        bond_infoes.append((atom_map.inv[(frag_idx, atom_id_list[frag_idx][atom_idx])], bond_type))
+        frag_bond = fragments[frag_idx].bond_list[bond_pos]
+        bond_list.append((atom_order.index(atom_map2.inv[(frag_idx, atom_id_list[frag_idx][frag_bond.atom_idx])]), frag_bond.token))
+    bond_list = FragBondList(bond_list)
 
     # Create the new fragment information
-    new_frag_info = [smiles]
-    for bond_info in bond_infoes:
-        new_frag_info.extend(bond_info)
-    new_frag_info = tuple(new_frag_info)
+    new_fragment = Fragment(smiles, bond_list, list(range(len(new_atom_maps))))
 
-    # Normalize bond information
-    final_frag_info, new_atom_indices = normalize_bond_info(new_frag_info, list(range(len(new_atom_maps))))
-
-    # Create the final atom map
-    final_atom_map = bidict()
-    for i, atom_idx in enumerate(new_atom_indices):
-        final_atom_map[i] = new_atom_maps[atom_idx]
-
-    return final_frag_info, final_atom_map
+    return new_fragment

@@ -25,7 +25,6 @@ if __name__ == '__main__':
 
         smiles_list = read_smiles(smiles_file, binary=True)
 
-
         total_cnt = 0
         success_cnt = 0
         vocab_tensors = []
@@ -45,15 +44,15 @@ if __name__ == '__main__':
                             # print(f'Input SMILES: {input_smiles}')
                             raise ValueError('Tensorization Failed')
                         
-                        # output_mol = vocab.detensorize(*tensor)
-                        # output_smiles = Chem.MolToSmiles(output_mol, canonical=True)
-                        # # print(f'detensorize: {output_smiles}')
-                        # result = input_smiles == output_smiles
+                        output_mol = vocab.detensorize(*tensor)
+                        output_smiles = Chem.MolToSmiles(output_mol, canonical=True)
+                        # print(f'detensorize: {output_smiles}')
+                        result = input_smiles == output_smiles
 
-                        # if not result:
-                        #     # print(f'Input SMILES: {input_smiles}')
-                        #     # print(f'detensorize: {output_smiles}')
-                        #     raise ValueError('Isomorphic Check Failed')
+                        if not result:
+                            # print(f'Input SMILES: {input_smiles}')
+                            # print(f'detensorize: {output_smiles}')
+                            raise ValueError('Isomorphic Check Failed')
 
                         vocab_tensor, order_tensor, mask_tensor = tensor
                         vocab_tensors.append(vocab_tensor)
@@ -112,15 +111,15 @@ if __name__ == '__main__':
                         # print(f'Input SMILES: {input_smiles}')
                         raise ValueError('Tensorization Failed')
                     
-                    # output_mol = vocab.detensorize(*tensor)
-                    # output_smiles = Chem.MolToSmiles(output_mol, canonical=True)
-                    # # print(f'detensorize: {output_smiles}')
-                    # result = input_smiles == output_smiles
+                    output_mol = vocab.detensorize(*tensor)
+                    output_smiles = Chem.MolToSmiles(output_mol, canonical=True)
+                    # print(f'detensorize: {output_smiles}')
+                    result = input_smiles == output_smiles
 
-                    # if not result:
-                    #     # print(f'Input SMILES: {input_smiles}')
-                    #     # print(f'detensorize: {output_smiles}')
-                    #     raise ValueError('Isomorphic Check Failed')
+                    if not result:
+                        # print(f'Input SMILES: {input_smiles}')
+                        # print(f'detensorize: {output_smiles}')
+                        raise ValueError('Isomorphic Check Failed')
     elif True:
         # 分子
         mol = Chem.MolFromSmiles("CCO[C]C")

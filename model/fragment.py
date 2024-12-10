@@ -5,6 +5,7 @@ import copy
 from collections import defaultdict, Counter
 import dill
 import os
+import re
 
 try:
     from utils import *
@@ -20,7 +21,9 @@ class Fragment:
     bond_annotations = {'-': '[Nh]', '=': '[Og]', '#': '[Ts]', ':': '[Lv]'}
 
     def __init__(self, smiles, frag_bond_list, atom_map=None):
-        mol, smiles, frag_bond_list, atom_map = Fragment.normalize_frag_info(smiles, frag_bond_list, atom_map)
+        mol, smiles, frag_bond_list, atom_map, \
+            mol_with_alt, smiles_with_alt, atom_map_with_alt \
+                = Fragment.normalize_frag_info(smiles, frag_bond_list, atom_map)
 
         self.mol = Chem.MolFromSmiles(smiles)
         self.smiles = smiles
@@ -30,6 +33,10 @@ class Fragment:
             raise ValueError("The bond list must be an instance of FragBondList.")
         self.atom_map = atom_map
         self.id  = -1
+        self.mol_with_alt = mol_with_alt
+        self.smiles_with_alt = smiles_with_alt
+        self.atom_map_with_alt = atom_map_with_alt
+        self.smarts_mol = None
         
     def __str__(self):
         output = [self.smiles] + [item for atom_idx_bond_type in self.bond_list for item in atom_idx_bond_type]
@@ -42,19 +49,33 @@ class Fragment:
         output = [self.smiles] + [item for atom_idx_bond_type in self.bond_list for item in atom_idx_bond_type]
         return iter(tuple(output))
     
-    def get_bond_pos(self, atom_idx, bond_type, start_pos=0):
-        match_bond_ids = self.bond_list.get_bond_ids(atom_idx, bond_type)
+    def __eq__(self, other: Fragment):
+        return tuple(self) == tuple(other)
+
+    def get_bond_pos(self, atom_idx, bond_token, start_pos=0):
+        match_bond_ids = self.bond_list.get_bond_ids(atom_idx, bond_token)
         return match_bond_ids[start_pos]
+    
+    def get_bond_poses(self, atom_idx, bond_token):
+        return self.bond_list.get_bond_ids(atom_idx, bond_token)
+
+    @staticmethod
+    def from_tuple(fragment_tuple, atom_map=None):
+        smiles = fragment_tuple[0]
+        bond_infoes = [(int(atom_idx), bond_token) for atom_idx, bond_token in zip(fragment_tuple[1::2], fragment_tuple[2::2])]
+        frag_bond_list = FragBondList(bond_infoes)
+        return Fragment(smiles, frag_bond_list, atom_map)
 
     @staticmethod
     def normalize_frag_info(smiles, bond_list, atom_map = None):
         mol = Chem.MolFromSmiles(smiles)
         mol_with_alt, smiles_with_alt, atom_map_with_alt = Fragment._add_bond_annotations(mol, bond_list, atom_map)
         normalized_mol, normalized_smiles, normalized_atom_map, normalized_bond_list = Fragment._remove_bond_annotations(mol_with_alt, atom_map_with_alt)
-        return normalized_mol, normalized_smiles, normalized_bond_list, normalized_atom_map
+        return normalized_mol, normalized_smiles, normalized_bond_list, normalized_atom_map, mol_with_alt, smiles_with_alt, atom_map_with_alt
 
     @staticmethod
     def _add_bond_annotations(mol, bond_list: FragBondList, atom_indices = None):
+        mol = copy.deepcopy(mol)
         if atom_indices is None:
             atom_indices = list(range(mol.GetNumAtoms()))
         
@@ -100,6 +121,7 @@ class Fragment:
         Returns:
             Chem.Mol: RDKit molecule object without bond annotations.
         """
+        mol = copy.deepcopy(mol)
         if atom_indices is None:
             atom_indices = list(range(mol.GetNumAtoms()))
 
@@ -236,7 +258,33 @@ class Fragment:
                 fragment_list = [Fragment.parse_fragment_string(line.strip()) for line in f]
         return fragment_list
 
+    @property
+    def smarts(self):
+        if self.smarts_mol is None:
+            smarts_with_alt = Chem.MolToSmarts(self.mol_with_alt)
+            for bond_token, alt_symbol in Fragment.bond_annotations.items():
+                smarts_with_alt = smarts_with_alt.replace(alt_symbol, '[*]')
+            self.smarts_mol = Chem.MolFromSmarts(smarts_with_alt)
+        return self.smarts_mol
     
+    def GetSubstructMatches(self, query: Fragment):
+        matches = self.mol_with_alt.GetSubstructMatches(query.smarts) # qry_alt_idx: tgt_alt_idx
+        qry_idx_to_tgt_alt_idx_list = []
+        for match in matches:
+            qry_idx_to_tgt_alt_idx = []
+            for qry_idx in query.atom_map:
+                qry_idx_to_tgt_alt_idx.append(match[query.atom_map_with_alt.index(qry_idx)])
+            qry_idx_to_tgt_alt_idx_list.append(qry_idx_to_tgt_alt_idx)
+        
+        qry_idx_to_tgt_idx_list = []
+        for qry_idx_to_tgt_alt_idx in qry_idx_to_tgt_alt_idx_list:
+            match = []
+            for tgt_alt_idx in qry_idx_to_tgt_alt_idx:
+                match.append(self.atom_map_with_alt[tgt_alt_idx])
+            qry_idx_to_tgt_idx_list.append(tuple(match))
+
+        return list(set(qry_idx_to_tgt_idx_list))
+
 
     
 

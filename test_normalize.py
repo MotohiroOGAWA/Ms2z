@@ -1,4 +1,4 @@
-from model import *
+from model.fragment import Fragment, FragBondList
 from model.utils import *
 from model.fragment import alt_atom
 from rdkit import Chem

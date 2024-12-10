@@ -23,10 +23,10 @@ class FragmentBond:
 class FragBondList:
     def __init__(self, bond_info=None):
         """
-        bond_info: list of tuples [(atom_idx, bond_token), ...]
+        bond_info: list of tuples [(atom_idx, bond_token), ...] or list of FragmentBond instances
         """
         if bond_info:
-            self.bonds = [FragmentBond(atom_idx, bond_token) for atom_idx, bond_token in bond_info]
+            self.bonds = [info if isinstance(info, FragmentBond) else FragmentBond(info[0], info[1]) for info in bond_info]
             self._sort_and_reassign_ids()
         else:
             self.bonds = []
@@ -68,6 +68,9 @@ class FragBondList:
     
     def get_bond_ids(self, atom_idx, bond_token):
         return [bond.id for bond in self.bonds if bond.atom_idx == atom_idx and bond.token == bond_token]
+    
+    def tolist(self):
+        return [(bond.atom_idx, bond.token) for bond in self.bonds]
         
     
     @property
