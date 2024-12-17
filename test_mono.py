@@ -1,6 +1,7 @@
 from rdkit import Chem
 # from rdkit.Chem import Draw
 from tqdm import tqdm
+import os
 import torch
 
 from model.utils import *
@@ -14,27 +15,40 @@ if __name__ == '__main__':
     code = 'mono_test'
     # code = 'flow_test'
     if code == 'mono_test':
-        monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/pubchem/monoatomic_tokens.txt'
-        fragment_counter_file = '/workspaces/Ms2z/mnt/data/graph/pubchem/fragment_counter.pkl'
+        # monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/monoatomic_tokens.txt'
+        # fragment_counter_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/fragment_counter.pkl'
+        # save_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/vocab.pkl'
+        monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/monoatomic_tokens.txt'
+        fragment_counter_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/fragment_counter.pkl'
+        save_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/vocab.pkl'
         
+        threshold = 2
         max_seq_len = 100
-        vocab = Vocab(monoatomic_tokens_file, fragment_counter_file, threshold=0)
+
+        if os.path.exists(save_file):
+            vocab = Vocab.load(save_file)
+        else:
+            vocab = Vocab(monoatomic_tokens_file, fragment_counter_file, threshold=threshold, save_path=save_file)
 
         smiles_list = [
-            # 'COc1ccc(C)cc1S(=O)(=O)C(C)C',
-            # 'O=P(O)(O)O',
-            # 'Cc1nc(C)c2ncn(C3OC(CO)C(O)C3O)c2n1',
-            # 'Cc1nc(C)c2ncn(C3OC(CO)C(O)C3O)c2n1',
-            # 'CCCCCCC=CN(CCCCCCCC)CCCCCCCC',
-            # 'O=C1c2ccc(NCCNCCO)c(NCCNCCO)c2C(=O)c2c(O)ccc(O)c21',
+            'COc1ccc(C)cc1S(=O)(=O)C(C)C',
+            'O=P(O)(O)O',
+            'Cc1nc(C)c2ncn(C3OC(CO)C(O)C3O)c2n1',
+            'Cc1nc(C)c2ncn(C3OC(CO)C(O)C3O)c2n1',
+            'CCCCCCC=CN(CCCCCCCC)CCCCCCCC',
+            'O=C1c2ccc(NCCNCCO)c(NCCNCCO)c2C(=O)c2c(O)ccc(O)c21',
             # 'O=c1c2ccc(O)cc2c(=O)c2cc3c(=O)c4cc(O)ccc4c(=O)c3cc12',
-            # 'NCC(C1=CC=CCC=C1)c1ccccc1',
-            # 'CC(=CC=O)c1ccc(N(C)C)cc1',
-            # 'C=CCCCC(O)C(O)CO',
-            # 'COc1ccc(O)c(C(=O)Cl)c1',
-            # 'Cc1cccc(C(=O)Nc2ccc(N(C)CCc3ccncc3)cc2)c1',
-            # 'CCCC(C)(C)C(C)NC(=O)C(CCC(N)=O)NC(=O)C(C)(OC(C)C)OC(C)C',
+            'NCC(C1=CC=CCC=C1)c1ccccc1',
+            'CC(=CC=O)c1ccc(N(C)C)cc1',
+            'C=CCCCC(O)C(O)CO',
+            'COc1ccc(O)c(C(=O)Cl)c1',
+            'Cc1cccc(C(=O)Nc2ccc(N(C)CCc3ccncc3)cc2)c1',
+            'CCCC(C)(C)C(C)NC(=O)C(CCC(N)=O)NC(=O)C(C)(OC(C)C)OC(C)C',
             'COc1ccc(C(c2ccc(O)c(C)c2)C(c2ccc(O)c(C)c2)c2ccc(O)c(C)c2)cc1C',
+            'C=CCCC(C)C(C)CC(=C)C',
+            'C=C(C)CCC(CCCC)CC(C(C)C)C(C)C(C)C',
+            'CN(C)C(N(C)C)(N(C)c1ccccc1)N(C)c1ccccc1',
+            'C=C(C)CCC(CCCC)CC(C(C)C=C(C)C(C)CC)C(C)C(C)C',
             ]
 
         with tqdm(total=len(smiles_list), mininterval=0.5) as pbar:
@@ -60,6 +74,7 @@ if __name__ == '__main__':
                         # print(f'Input SMILES: {input_smiles}')
                         # print(f'detensorize: {output_smiles}')
                         raise ValueError('Isomorphic Check Failed')
+                pbar.update(1)
                     
     elif True:
         # 分子

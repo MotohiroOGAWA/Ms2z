@@ -70,7 +70,8 @@ def main(args):
                 error_smiles.append(f'Error: {i}')
         finally:
             total_cnt += 1
-            iterator.set_postfix_str(f'Success: {success_cnt}/{total_cnt} ({success_cnt/total_cnt:.2%})')
+            if total_cnt % 100 == 0:
+                iterator.set_postfix_str(f'Success: {success_cnt}/{total_cnt} ({success_cnt/total_cnt:.2%})')
     count_labels = dict(count_labels.most_common())
     atom_tokens = atom_tokens_sort(list(atom_tokens))
     if 'b' in  args.save_cnt_label:
@@ -83,7 +84,7 @@ def main(args):
         f.write("\n".join([str(k) for k in atom_tokens]))
 
     if args.error_smi_file is not None:
-        with open(args.error_smi_file, "w") as f:
+        with open(os.path.join(args.save_dir, args.error_smi_file), "w") as f:
             f.write("\n".join(error_smiles))
 
     distribution_df = plot_counter_distribution(count_labels, save_file=os.path.join(args.save_dir, "plot", 'vocab_count_labels_0.png'), bin_width=1, y_scale='log')

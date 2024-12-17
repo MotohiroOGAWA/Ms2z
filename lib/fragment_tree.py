@@ -6,7 +6,7 @@ import copy
 from tqdm import tqdm
 
 from .utils import *
-from .fragment_group import FragmentGroup, Fragment, FragBondList, FragmentBond
+from .fragment_group import FragmentGroup, Fragment, FragBondList, FragmentBond, split_fragment_info
 
 
 class FragmentNode:
@@ -19,6 +19,14 @@ class FragmentNode:
         self.depth = depth  # Depth of the node in the tree
         self.leaves = []    # List of leaf values (associated fragments)
         self.score = score # Score of the node
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['children'] = {k: v for k, v in self.children.items()}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
     
     def add_child(self, keys:list, value):
         """
@@ -37,6 +45,72 @@ class FragmentNode:
             self.children[key].add_child(keys, value)
         else:
             self.children[key].leaves.append(value)
+
+    def to_dict(self):
+        """
+        Convert the FragmentNode and its children to a dictionary.
+        :return: A dictionary representing the node and its children.
+        """
+        return {
+            "depth": self.depth,
+            "score": self.score,
+            "leaves": self.leaves,
+            "children": {key: child.to_dict() for key, child in self.children.items()}
+        }
+
+    @staticmethod
+    def from_dict(data):
+        """
+        Create a FragmentNode from a dictionary representation.
+        :param data: A dictionary containing the node data.
+        :return: A FragmentNode object.
+        """
+        node = FragmentNode(data["depth"], data["score"])
+        node.leaves = data["leaves"]
+        node.children = {key: FragmentNode.from_dict(child_data) for key, child_data in data["children"].items()}
+        return node
+
+    def to_list(self, current_path=None):
+        """
+        Convert the FragmentNode tree into a list of (path, leaves, depth, score) tuples.
+        :param current_path: Current path in the tree (used for recursion).
+        :return: List of (path, leaves, depth, score) tuples.
+        """
+        if current_path is None:
+            current_path = []
+        
+        result = []
+        
+        # Add the current node's leaves, depth, and score to the result
+        if self.leaves:
+            result.append((current_path, self.leaves, self.depth, self.score))
+        
+        # Recursively process children
+        for key, child in self.children.items():
+            result.extend(child.to_list(current_path + [key]))
+        
+        return result
+
+    @staticmethod
+    def from_list(data):
+        """
+        Reconstruct a FragmentNode tree from a list of (path, leaves, depth, score) tuples.
+        :param data: List of (path, leaves, depth, score) tuples.
+        :return: Reconstructed FragmentNode tree.
+        """
+        root = FragmentNode(depth=0, score=0)
+        
+        for path, leaves, depth, score in data:
+            current_node = root
+            for key in path:
+                if key not in current_node.children:
+                    current_node.children[key] = FragmentNode(depth=current_node.depth + 1, score=current_node.score)
+                current_node = current_node.children[key]
+            current_node.leaves.extend(leaves)
+            current_node.depth = depth  # Ensure depth is restored
+            current_node.score = score  # Ensure score is restored
+        
+        return root
 
     def display(self, level=0, prefix="", max_depth=None):
         """
@@ -94,6 +168,14 @@ class FragmentTree:
     """
     def __init__(self):
         self.root = FragmentNode(depth=0, score=0)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['root'] = self.root 
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
     
     def search(self, ori_fragment: Fragment, bond_pos, start_atom_idx=None):
         ori_fragment = copy.deepcopy(ori_fragment)
@@ -119,7 +201,7 @@ class FragmentTree:
             current_bond_pos = current_fragment_info_dict['bond_pos']
             current_parent = current_fragment_info_dict['parent']
             if current_bond_pos == -1:
-                start_global_atom_idx = start_atom_idx
+                start_global_atom_idx = current_frag.atom_map[start_atom_idx]
             else:
                 start_global_atom_idx = current_frag.atom_map[current_frag.bond_list[current_bond_pos].atom_idx]
             # current_atom_map = current_fragment_info_dict['atom_map']
@@ -175,7 +257,7 @@ class FragmentTree:
                 if current_bond_pos == -1:
                     start_mol = Chem.MolFromSmiles(qry_frag_smiles)
                     qry_start_atom = start_mol.GetAtomWithIdx(0)
-                    if start_atom.GetAtomicNum() != qry_start_atom.GetAtomicNum():
+                    if get_atom_symbol(start_atom) != get_atom_symbol(qry_start_atom):
                         continue
                     if start_atom.GetNumExplicitHs() != qry_start_atom.GetNumExplicitHs():
                         continue
@@ -197,7 +279,7 @@ class FragmentTree:
             cut_remaining_atom_indices = set()
             if current_bond_pos == -1:
                 cut_remaining_atom_indices.add(start_atom_idx)
-                visited.update([start_atom_idx])
+                visited.update([current_frag.atom_map[start_atom_idx]])
             else:
                 for qry_frag_bond in qry_frag.bond_list:
                     # if qry_start_pos == qry_frag_bond.id:
@@ -239,9 +321,13 @@ class FragmentTree:
                         if s_bond_pos in root_bond_poses:
                             root_bond_poses.remove(s_bond_pos)
 
-                    if current_bond_pos != 1 and len(root_bond_poses) == 0:
+                    if current_bond_pos != -1 and current_bond_pos != 1 and len(root_bond_poses) == 0:
                         raise ValueError(f'Cannot Build Fragment Tree: {ori_fragment}')
-                    root_bond_pos = root_bond_poses[0]
+                    if len(root_bond_poses) == 0:
+                        root_bond_pos = -1
+                    else:
+                        root_bond_pos = root_bond_poses[0]
+
                     if current_parent[0] == -1:
                         root_next[2] = (0, root_bond_pos)
                     else:
@@ -254,8 +340,7 @@ class FragmentTree:
                     break
 
         if current_atom_nums != total_atom_nums:
-            error_message =  '\n'.join([f'{k}: {v}' for k, v in enumerate(vocab_list)])
-            raise ValueError(f'Cannot Build Fragment Tree: {ori_fragment}\n{error_message}')
+            raise ValueError(f'Cannot Build Fragment Tree: {ori_fragment}')
         return tuple(root_next), vocab_list, global_atom_map
     
     def add_fragment(self, fragment: Fragment):
@@ -265,6 +350,8 @@ class FragmentTree:
 
     @staticmethod
     def get_tree_keys(fragment_mol, frag_bond_list: FragBondList, start_bond_pos):
+        fragment_mol = copy.deepcopy(fragment_mol)
+        frag_bond_list = copy.deepcopy(frag_bond_list)
         traversal_order = [[frag_bond_list[start_bond_pos].token]]
         visited = set()
         FragmentTree.dfs(fragment_mol, visited, traversal_order, prev_atom_indices=[frag_bond_list[start_bond_pos].atom_idx], frag_bond_list=FragBondList([frag_bond for frag_bond in frag_bond_list if frag_bond.id != start_bond_pos]))
@@ -283,7 +370,7 @@ class FragmentTree:
                 continue
             atom = mol.GetAtomWithIdx(atom_index)
             visited.add(atom_index)
-            current_symbols.append(atom.GetAtomicNum())
+            current_symbols.append(get_atom_symbol(atom))
             for frag_bond in frag_bond_list:
                 if frag_bond.atom_idx == atom_index:
                     current_bonds.append(frag_bond.token)
@@ -332,6 +419,24 @@ class FragmentTree:
         """
         with open(file_path, "rb") as file:
             return dill.load(file)
+
+    def to_dict(self):
+        return self.root.to_dict()
+
+    @staticmethod
+    def from_dict(data):
+        tree = FragmentTree()
+        tree.root = FragmentNode.from_dict(data)
+        return tree
+
+    def to_list(self):
+        return self.root.to_list()
+    
+    @staticmethod
+    def from_list(data):
+        tree = FragmentTree()
+        tree.root = FragmentNode.from_list(data)
+        return tree
 
     def display_tree(self, max_depth=None):
         """
@@ -425,105 +530,3 @@ def build_route_tree(frag_info, start_bond_pos, mol=None, options=None):
         completed_routes.append(current_route)
     
     return completed_routes
-
-
-def split_fragment_info(ori_fragment: Fragment, cut_bond_indices):
-    # Extract the SMILES string from frag_info
-    smiles = ori_fragment.smiles
-
-    # Convert SMILES to Mol object
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None:
-        raise ValueError("Invalid SMILES string in frag_info.")
-    mol = Chem.rdmolops.RemoveHs(mol)
-    
-    # Create editable version of the molecule
-    new_mol = Chem.RWMol(mol)
-
-    for atom in new_mol.GetAtoms():
-        atom.SetAtomMapNum(atom.GetIdx())
-    
-    # Break specified bonds
-    bond_tokens_dict = {}
-    for idx1, idx2 in cut_bond_indices:
-        if new_mol.GetBondBetweenAtoms(idx1, idx2) is not None:
-            atom1 = new_mol.GetAtomWithIdx(idx1)
-            atom2 = new_mol.GetAtomWithIdx(idx2)
-            bond = new_mol.GetBondBetweenAtoms(idx1, idx2)
-            new_mol = add_Hs(new_mol, atom1, atom2, bond)  # Add hydrogens to adjust valence
-            new_mol.RemoveBond(atom1.GetIdx(), atom2.GetIdx())
-            if idx1 < idx2:
-                bond_tokens_dict[(idx1, idx2)] = chem_bond_to_token(bond.GetBondType())
-            else:
-                bond_tokens_dict[(idx2, idx1)] = chem_bond_to_token(bond.GetBondType())
-        else:
-            raise ValueError(f"No bond found between atom indices {idx1} and {idx2}.")
-    
-    # Generate new fragment information for each resulting fragment
-    new_mol = new_mol.GetMol()
-    new_mol = sanitize(new_mol, kekulize = False)
-    new_smiles = Chem.MolToSmiles(new_mol)
-    fragment_mols = [Chem.MolFromSmiles(fragment) for fragment in new_smiles.split('.')]
-    fragment_mols = [sanitize(fragment, kekulize = False) for fragment in fragment_mols]
-
-    new_fragments = []
-    bond_poses_dict = defaultdict(lambda: defaultdict(list))
-    for frag_idx, frag_mol in enumerate(fragment_mols):
-        
-        atom_dict = {} # original atom index -> local atom index
-        for i, atom in enumerate(frag_mol.GetAtoms()):
-            amap = atom.GetAtomMapNum()
-            atom_dict[amap] = i
-            
-        for atom in frag_mol.GetAtoms():
-            frag_mol.GetAtomWithIdx(atom.GetIdx()).SetAtomMapNum(0)
-
-        frag_smi = Chem.MolToSmiles(frag_mol)
-        atom_order = list(map(int, frag_mol.GetProp('_smilesAtomOutputOrder')[1:-2].split(",")))
-
-        for key in atom_dict: # original atom index -> new local atom index
-            atom_dict[key] = atom_order.index(atom_dict[key])
-        
-        frag_bond_list = []
-        for frag_bond in ori_fragment.bond_list:
-            if frag_bond.atom_idx in atom_dict:
-                frag_bond_list.append(FragmentBond(atom_dict[frag_bond.atom_idx], frag_bond.token))
-        for (idx1, idx2) in cut_bond_indices:
-            if idx1 in atom_dict:
-                idx = idx1
-            elif idx2 in atom_dict:
-                idx = idx2
-            else:
-                continue
-            
-            bond_token = bond_tokens_dict.get((idx1, idx2), bond_tokens_dict.get((idx2, idx1)))
-            frag_bond_list.append(FragmentBond(atom_dict[idx], bond_token))
-
-        atom_map = [ori_fragment.atom_map[k] for k, v in sorted(atom_dict.items(), key=lambda x: x[1])]
-        new_fragment = Fragment(frag_smi, FragBondList(frag_bond_list), atom_map)
-        for frag_bond in new_fragment.bond_list:
-            bond_poses_dict[frag_idx][(frag_bond.atom_idx, frag_bond.token)].append(frag_bond.id)
-        new_fragments.append(new_fragment)
-    
-    fragment_group = FragmentGroup(new_fragments)
-    bond_pair = {}
-    for (bond_idx1, bond_idx2) in cut_bond_indices:
-        for frag_idx, new_fragment in enumerate(new_fragments):
-            if ori_fragment.atom_map[bond_idx1] in new_fragment.atom_map:
-                bond_i1 = new_fragment.atom_map.index(ori_fragment.atom_map[bond_idx1])
-                frag_idx1 = frag_idx
-            if ori_fragment.atom_map[bond_idx2] in new_fragment.atom_map:
-                bond_i2 = new_fragment.atom_map.index(ori_fragment.atom_map[bond_idx2])
-                frag_idx2 = frag_idx
-        bond = mol.GetBondBetweenAtoms(bond_idx1, bond_idx2)
-        bond_token = chem_bond_to_token(bond.GetBondType())
-
-        bond_pair[(len(bond_pair), bond_token)] = \
-            ((frag_idx1, bond_i1), 
-             (frag_idx2, bond_i2))
-            # ((frag_idx1, bond_poses_dict[frag_idx1][(bond_i1, bond_token)].pop(0)), 
-            #  (frag_idx2, bond_poses_dict[frag_idx2][(bond_i2, bond_token)].pop(0)))
-    
-    fragment_group.set_bond_pair(bond_pair)
-
-    return fragment_group

@@ -7,12 +7,8 @@ import dill
 import os
 import re
 
-try:
-    from utils import *
-    from fragment_bond import *
-except:
-    from .utils import *
-    from .fragment_bond import *
+from .utils import *
+from .fragment_bond import *
 
 
 
@@ -269,8 +265,18 @@ class Fragment:
     
     def GetSubstructMatches(self, query: Fragment):
         matches = self.mol_with_alt.GetSubstructMatches(query.smarts) # qry_alt_idx: tgt_alt_idx
-        qry_idx_to_tgt_alt_idx_list = []
+        matches = list(set(matches))
+
+        matches2 = []
         for match in matches:
+            tmp = [m for i, m in enumerate(match) if query.atom_map_with_alt[i] >= 0]
+            adjacent_pairs = search_atom_indices_adjacent_to_group(self.mol_with_alt, tmp)
+            if len(adjacent_pairs) == len(query.bond_list):
+                matches2.append(match)
+
+
+        qry_idx_to_tgt_alt_idx_list = []
+        for match in matches2:
             qry_idx_to_tgt_alt_idx = []
             for qry_idx in query.atom_map:
                 qry_idx_to_tgt_alt_idx.append(match[query.atom_map_with_alt.index(qry_idx)])
@@ -283,9 +289,45 @@ class Fragment:
                 match.append(self.atom_map_with_alt[tgt_alt_idx])
             qry_idx_to_tgt_idx_list.append(tuple(match))
 
-        return list(set(qry_idx_to_tgt_idx_list))
+        return qry_idx_to_tgt_idx_list
 
 
+
+def search_atom_indices_adjacent_to_group(mol, atom_idx_group: list[int]):
+    """
+    Search for atom indices adjacent to a specified group of atomic indices in a molecule.
+
+    Parameters:
+        mol: RDKit molecule object
+            The molecular structure in which the search is performed.
+        atom_idx_group: list[int]
+            A list of atomic indices representing the group for which adjacent atoms are to be identified.
+
+    Returns:
+        result: list[tuple[int, int]]
+            A list of tuples where each tuple contains:
+            - An atomic index from the specified group.
+            - The atomic index of a neighboring atom that is not in the specified group.
+
+    Description:
+        This function iterates over the atoms in the specified `atom_idx_group` and identifies all neighboring
+        atoms in the molecule `mol` that are not part of the given group. Each pair of a group atom and its
+        adjacent non-group atom is returned as a tuple.
+
+    Example:
+        # Assuming `mol` is an RDKit molecule object
+        atom_group = [0, 1, 2]
+        adjacent_atoms = search_atom_indices_adjacent_to_group(mol, atom_group)
+        print(adjacent_atoms)
+        # Output might be: [(0, 3), (1, 4), (2, 5)]
+    """
+    result = []
+    for atom_idx in atom_idx_group:
+        atom = mol.GetAtomWithIdx(atom_idx)
+        for neighbor in atom.GetNeighbors():
+            if neighbor.GetIdx() not in atom_idx_group:
+                result.append((atom_idx, neighbor.GetIdx()))
+    return result
     
 
 alt_atom = {bond_type: Chem.MolFromSmiles(atom_label).GetAtomWithIdx(0) for bond_type, atom_label in Fragment.bond_annotations.items()}

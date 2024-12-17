@@ -1,6 +1,7 @@
 import dill
 from collections import Counter, defaultdict
 import bidict
+from tqdm import tqdm
 import torch
 
 from .utils import *
@@ -12,37 +13,49 @@ from .fragment_tree import FragmentTree
 
 
 class Vocab:
-    def __init__(self, monoatomic_tokens_path, fragment_counter_path, threshold):
-        # load monoatomic tokens and fragment counter
-        with open(monoatomic_tokens_path, 'r') as f:
-            monoatomic_fragments = [Fragment.parse_fragment_string(line.strip()) for line in f]
-        if fragment_counter_path.endswith('.pkl'):
-            fragment_counter = dill.load(open(fragment_counter_path, 'rb'))
-        else:
-            with open(fragment_counter_path, 'r') as f:
-                fragment_counter = dict([(eval(line.strip().split('\t')[0]), int(line.strip().split('\t')[1]))
-                        for line in f])
-                fragment_counter = Counter(fragment_counter)
+    def __init__(self, monoatomic_tokens_path, fragment_counter_path, threshold, save_path=None):
+        tokens = ['<BOS>', '<EOS>', '<PAD>', '<UNK>']
+        
+        self.threshold = threshold
+        if monoatomic_tokens_path is not None and fragment_counter_path is not None:
+            # load monoatomic tokens and fragment counter
+            print(f"Loading fragment library", end='...')
+            with open(monoatomic_tokens_path, 'r') as f:
+                monoatomic_fragments = [Fragment.parse_fragment_string(line.strip()) for line in f]
+            if fragment_counter_path.endswith('.pkl'):
+                fragment_counter = dill.load(open(fragment_counter_path, 'rb'))
+            else:
+                with open(fragment_counter_path, 'r') as f:
+                    fragment_counter = dict([(eval(line.strip().split('\t')[0]), int(line.strip().split('\t')[1]))
+                            for line in f])
+                    fragment_counter = Counter(fragment_counter)
+            print("done")
 
-        # get the vocab
-        vocab_dict = {tuple(frag): frag for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
-        # self.vocab = set([tuple(frag) for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens])
-        for frag_strings, cnt in fragment_counter.items():
-            if cnt >= threshold:
-                fragment = Fragment.parse_fragment_string(frag_strings)
-                if fragment.mol is not None:
-                    # self.vocab.add(tuple(fragment))
-                    vocab_dict[tuple(fragment)] = fragment
-                # else:
-                #     print(f"Invalid fragment: {frag_strings}")
-        # self.vocab.update([tuple(Fragment.parse_fragment_string(frag_strings)) for frag_strings, cnt in fragment_counter.items() if cnt >= threshold])
+            # get the vocab
+            vocab_dict = {tuple(frag): frag for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
+            for frag_strings, cnt in tqdm(fragment_counter.items(), desc='Building Vocabulary', mininterval=0.5):
+                try:
+                    if cnt >= threshold:
+                        fragment = Fragment.parse_fragment_string(frag_strings)
+                        if fragment.mol is not None:
+                            vocab_dict[tuple(fragment)] = fragment
+                except Exception as e:
+                    print(f"Error: {e}: {frag_strings}")            
+            
+            self.vocab = bidict({v:i for i, v in enumerate(Vocab.tokens)})
+            self.vocab.update({v:i+len(Vocab.toknes) for i, v in enumerate(vocab_dict.keys())})
 
-        self.vocab = bidict({v:i for i, v in enumerate(vocab_dict.keys())})
 
-        self.tree = FragmentTree()
-        self.tree.add_fragment_list(vocab_dict.values())
+            self.tree = FragmentTree()
+            self.tree.add_fragment_list(vocab_dict.values())
         
         self.fragmentizer = Fragmentizer()
+
+        if save_path:
+            print(f"Saving vocabulary to {save_path}", end='...')
+            self.save(save_path)
+            print("done")
+            print(f"Vocabulary size (>={self.threshold}): {len(self.vocab)}")
 
     def __len__(self):
         return len(self.vocab)
@@ -52,6 +65,32 @@ class Vocab:
             return self.vocab.inv[key]
         elif isinstance(key, tuple):
             return self.vocab[key]
+    
+    def save(self, path):
+        dill.settings['recurse'] = True
+        data_to_save = {
+            'vocab': self.vocab,
+            'tree': self.tree.root.to_list(),
+            'threshold': self.threshold,
+        }
+        dill.dump(data_to_save, open(path, 'wb'))
+
+    @staticmethod
+    def load(path, message=True):
+        if message:
+            print(f"Loading vocabulary from {path}", end='...')
+        data = dill.load(open(path, 'rb'))
+        if message:
+            print("done")
+        vocab_data = data['vocab']
+        tree_data = data['tree']
+        threshold = data['threshold']
+        vocab = Vocab(None, None, threshold)
+        vocab.vocab = vocab_data
+        vocab.tree = FragmentTree.from_list(tree_data)
+        if message:
+            print(f"Vocabulary size (>={vocab.threshold}): {len(vocab.vocab)}")
+        return vocab
 
     def assign_vocab(self, mol):
         fragment_group = self.fragmentizer.split_molecule(mol)
@@ -76,10 +115,10 @@ class Vocab:
 
             frag_to_idx[tuple(fragment)] = idx
         
-        atom_scores = calculate_advanced_scores(mol)
-        max_atom_score_tuple = max(atom_scores, key=lambda x: x[2])
-        max_atom_score_idx = max_atom_score_tuple[0]
-        # max_atom_score = max_atom_score_tuple[2]
+        # atom_scores = calculate_advanced_scores(mol)
+        # max_atom_score_tuple = max(atom_scores, key=lambda x: x[2])
+        # max_atom_score_idx = max_atom_score_tuple[0]
+        max_atom_score_idx = 0
 
         ori_frag_idx, ori_atom_idx = fragment_group.match_atom_map(max_atom_score_idx)
 
@@ -183,8 +222,8 @@ class Vocab:
         if vocab_tree is None:
             return None
         
-        vocab_tensor = torch.empty(max_seq_len, dtype=torch.int32)
-        order_tensor = torch.empty(max_seq_len, 3, dtype=torch.int32) # (parent_idx, parent_bond_pos, bond_pos)
+        vocab_tensor = torch.zeros(max_seq_len, dtype=torch.int32)
+        order_tensor = torch.zeros(max_seq_len, 3, dtype=torch.int32) # (parent_idx, parent_bond_pos, bond_pos)
         mask_tensor =  torch.zeros(max_seq_len, dtype=torch.bool)  # 初期値は False
         mask_tensor[:len(vocab_tree)] = True
 
@@ -244,6 +283,7 @@ class Vocab:
         # 分子を正規化して返す
         mol = Chem.MolFromSmiles(merged_frag.smiles)
         return mol
+
 
 def calculate_advanced_scores(smiles_or_mol: str, sort=False):
     """
