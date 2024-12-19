@@ -1,4 +1,4 @@
-from .utils import token_to_chem_bond, bond_priority
+from .utils import token_to_chem_bond, token_to_num_bond, bond_priority
 
 
 class FragmentBond:
@@ -7,6 +7,7 @@ class FragmentBond:
         self.atom_idx = atom_idx
         self.token = bond_token
         self.type = token_to_chem_bond(bond_token)
+        self.num = token_to_num_bond(bond_token, aromatic_as_half=False)
 
     def __str__(self):
         return f"({self.atom_idx}, {self.token})"
@@ -68,6 +69,11 @@ class FragBondList:
     
     def get_bond_ids(self, atom_idx, bond_token):
         return [bond.id for bond in self.bonds if bond.atom_idx == atom_idx and bond.token == bond_token]
+    
+    def get_bond_id_and_token(self, atom_idx):
+        bond_ids = [bond.id for bond in self.bonds if bond.atom_idx == atom_idx]
+        bond_tokens = [bond.token for bond in self.bonds if bond.atom_idx == atom_idx]
+        return bond_ids, bond_tokens
     
     def tolist(self):
         return [(bond.atom_idx, bond.token) for bond in self.bonds]

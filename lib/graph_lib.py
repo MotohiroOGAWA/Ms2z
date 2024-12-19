@@ -43,7 +43,9 @@ def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix, processor, reverse
     for name, features in node_data.items():
         if node_size is None:
             node_size = features.size(0)
-        elif node_size != features.size(0):
+        elif isinstance(features, torch.Tensor) and features.size(0) != node_size:
+            raise ValueError("Node size mismatch.")
+        elif isinstance(features, list) and len(features) != node_size:
             raise ValueError("Node size mismatch.")
         
     if node_size != adj_matrix.size(0) or adj_matrix.size(0) != adj_matrix.size(1):
@@ -81,10 +83,10 @@ def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix, processor, reverse
         
         if pair_ids.size(0) == 0:
             continue
-        src = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 0].tolist()]) for name, features in node_data.items()}
-        dgt = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 1].tolist()]) for name, features in node_data.items()}
+        src = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 0].tolist()]) if isinstance(node_data[name], torch.Tensor) else [nodes[i].data[name] for i in pair_ids[:, 0].tolist()] for name, features in node_data.items()}
+        dst = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 1].tolist()]) if isinstance(node_data[name], torch.Tensor) else [nodes[i].data[name] for i in pair_ids[:, 1].tolist()] for name, features in node_data.items()}
 
-        mess_res = processor.message_func(src, dgt)
+        mess_res = processor.message_func(src, dst)
 
         for i, (parent_id, child_id) in enumerate(pair_ids):
             for name, value in mess_res.items():

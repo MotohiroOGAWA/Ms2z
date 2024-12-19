@@ -1,6 +1,6 @@
-from model.utils import *
-from model.fragmentizer import Fragmentizer
-from model.fragment import Fragment
+from lib.utils import *
+from lib.fragmentizer import Fragmentizer
+from lib.fragment import Fragment
 from stats.plot_utils import plot_counter_distribution
 
 from collections import Counter

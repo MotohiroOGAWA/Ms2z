@@ -6,6 +6,7 @@ from collections import defaultdict, Counter
 import dill
 import os
 import re
+import torch
 
 from .utils import *
 from .fragment_bond import *
@@ -54,6 +55,41 @@ class Fragment:
     
     def get_bond_poses(self, atom_idx, bond_token):
         return self.bond_list.get_bond_ids(atom_idx, bond_token)
+
+    def get_frag_bond_tensor(self):
+        atom_num = self.mol.GetNumAtoms()
+        frag_bond_tensor = torch.zeros(atom_num, 3, dtype=torch.int32)
+        for bond in self.bond_list:
+            frag_bond_tensor[bond.atom_idx, bond.num - 1] += 1
+        return frag_bond_tensor
+
+    def GetSubstructMatches(self, query: Fragment):
+        matches = self.mol_with_alt.GetSubstructMatches(query.smarts) # qry_alt_idx: tgt_alt_idx
+        matches = list(set(matches))
+
+        matches2 = []
+        for match in matches:
+            tmp = [m for i, m in enumerate(match) if query.atom_map_with_alt[i] >= 0]
+            adjacent_pairs = search_atom_indices_adjacent_to_group(self.mol_with_alt, tmp)
+            if len(adjacent_pairs) == len(query.bond_list):
+                matches2.append(match)
+
+
+        qry_idx_to_tgt_alt_idx_list = []
+        for match in matches2:
+            qry_idx_to_tgt_alt_idx = []
+            for qry_idx in query.atom_map:
+                qry_idx_to_tgt_alt_idx.append(match[query.atom_map_with_alt.index(qry_idx)])
+            qry_idx_to_tgt_alt_idx_list.append(qry_idx_to_tgt_alt_idx)
+        
+        qry_idx_to_tgt_idx_list = []
+        for qry_idx_to_tgt_alt_idx in qry_idx_to_tgt_alt_idx_list:
+            match = []
+            for tgt_alt_idx in qry_idx_to_tgt_alt_idx:
+                match.append(self.atom_map_with_alt[tgt_alt_idx])
+            qry_idx_to_tgt_idx_list.append(tuple(match))
+
+        return qry_idx_to_tgt_idx_list
 
     @staticmethod
     def from_tuple(fragment_tuple, atom_map=None):
@@ -174,7 +210,7 @@ class Fragment:
 
     
     @staticmethod
-    def split_to_monoatomic_fragment(mol):
+    def split_to_monoatomic_fragment(mol, aromatic_bonds=True):
         fragments = []
         for atom in mol.GetAtoms():
             atom_symbol = get_atom_symbol(atom)  # Get the symbol of the atom (e.g., 'C', 'O')
@@ -194,7 +230,7 @@ class Fragment:
                 
             bond_infoes = [(0, bond_token) for bond_token in bond_tokens]
             frag_bond_list = FragBondList(bond_infoes)
-            if ':' in frag_bond_list.tokens:
+            if not aromatic_bonds and ':' in frag_bond_list.tokens:
                 continue
 
             fragments.append(Fragment(get_atom_symbol(atom), frag_bond_list))
@@ -262,34 +298,6 @@ class Fragment:
                 smarts_with_alt = smarts_with_alt.replace(alt_symbol, '[*]')
             self.smarts_mol = Chem.MolFromSmarts(smarts_with_alt)
         return self.smarts_mol
-    
-    def GetSubstructMatches(self, query: Fragment):
-        matches = self.mol_with_alt.GetSubstructMatches(query.smarts) # qry_alt_idx: tgt_alt_idx
-        matches = list(set(matches))
-
-        matches2 = []
-        for match in matches:
-            tmp = [m for i, m in enumerate(match) if query.atom_map_with_alt[i] >= 0]
-            adjacent_pairs = search_atom_indices_adjacent_to_group(self.mol_with_alt, tmp)
-            if len(adjacent_pairs) == len(query.bond_list):
-                matches2.append(match)
-
-
-        qry_idx_to_tgt_alt_idx_list = []
-        for match in matches2:
-            qry_idx_to_tgt_alt_idx = []
-            for qry_idx in query.atom_map:
-                qry_idx_to_tgt_alt_idx.append(match[query.atom_map_with_alt.index(qry_idx)])
-            qry_idx_to_tgt_alt_idx_list.append(qry_idx_to_tgt_alt_idx)
-        
-        qry_idx_to_tgt_idx_list = []
-        for qry_idx_to_tgt_alt_idx in qry_idx_to_tgt_alt_idx_list:
-            match = []
-            for tgt_alt_idx in qry_idx_to_tgt_alt_idx:
-                match.append(self.atom_map_with_alt[tgt_alt_idx])
-            qry_idx_to_tgt_idx_list.append(tuple(match))
-
-        return qry_idx_to_tgt_idx_list
 
 
 

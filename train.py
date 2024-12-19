@@ -5,11 +5,12 @@ from tqdm import tqdm
 from datetime import datetime
 import torch
 import numpy as np
+import dill
 
-from model.torch_utils import load_dataset, get_optimizer, get_criterion, save_dataset, save_model, load_model
-from model.data_pipeline import get_ds
-from model.ms2z import Ms2z
-from model.logger import TSVLogger
+from lib.torch_utils import load_dataset, get_optimizer, get_criterion, save_dataset, save_model, load_model
+from lib.data_pipeline import get_ds
+from lib.ms2z import Ms2z
+from lib.logger import TSVLogger
 
 def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, epochs,
          train_size, val_size, test_size,
@@ -76,8 +77,11 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         max_epoch = epochs
         global_step = 0
 
+        vocab_file = files['vocab_file']
+        vocab_data =  dill.load(open(vocab_file, 'rb'))
         model = Ms2z(
-            vocab_size=vocab_size,
+            vocab_data=vocab_data,
+            max_seq_len=max_seq_len,
             vocab_embed_dim=model_info['vocab_dim'],
             latent_dim=model_info['latent_dim'],
         ).to(device)
@@ -103,14 +107,23 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             tree_tensor = batch['vocab'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
-            fp_tensor = batch['fp'].to(device)
+            # fp_tensor = batch['fp'].to(device)
 
-            z = model(tree_tensor, order_tensor, mask_tensor)
+            # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-            loss = criterion(z, fp_tensor)
+            token_mismatch_loss, kl_divergence_loss = \
+                model(tree_tensor, order_tensor, mask_tensor)
+            loss = token_mismatch_loss + kl_divergence_loss
+
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+
+            # for name, param in model.named_parameters():
+            #     if not torch.equal(param.data, param_backup[name]):
+            #         print(f"Parameter '{name}' was updated.")
+            #     else:
+            #         print(f"Parameter '{name}' was NOT updated.")
 
             global_step += 1
 
@@ -121,7 +134,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
                 loss_type=criterion_name, target_name='Fingerprint', loss_value=loss.item(), 
-                data_size=z.shape[0], accuracy=None, 
+                data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
 
             # Save the model and optimizer
@@ -160,12 +173,13 @@ def run_validation(model, val_dataloader, criterion, logger, global_step, epoch,
             tree_tensor = batch['vocab'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
-            fp_tensor = batch['fp'].to(device)
+            # fp_tensor = batch['fp'].to(device)
 
-            z = model(tree_tensor, order_tensor, mask_tensor)
-
-            loss = criterion(z, fp_tensor)
-            samples = z.shape[0]
+            token_mismatch_loss, kl_divergence_loss = \
+                model(tree_tensor, order_tensor, mask_tensor)
+            
+            loss = token_mismatch_loss + kl_divergence_loss
+            samples = tree_tensor.shape[0]
 
             total_samples += samples
             val_loss += loss.item() * samples

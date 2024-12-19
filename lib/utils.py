@@ -100,6 +100,32 @@ def token_to_chem_bond(token):
         raise ValueError("Invalid bond token.")
     return bond_type
 
+def token_to_num_bond(token, aromatic_as_half=False):
+    """
+    Converts a bond token to a numerical representation.
+
+    Parameters:
+        token (str): Bond token ('-', '=', '#', ':').
+        aromatic_as_half (bool): If True, represents aromatic bonds (:) as 2.5 (float),
+                                 and ensures all other bonds return as floats.
+
+    Returns:
+        int or float: Numerical representation of the bond.
+    
+    Raises:
+        ValueError: If the provided token is invalid.
+    """
+    if token == "-":
+        bond_type = 1.0 if aromatic_as_half else 1  # Single bond
+    elif token == "=":
+        bond_type = 2.0 if aromatic_as_half else 2  # Double bond
+    elif token == "#":
+        bond_type = 3.0 if aromatic_as_half else 3  # Triple bond
+    elif token == ":":
+        bond_type = 2.5 if aromatic_as_half else 4  # Aromatic bond
+    else:
+        raise ValueError("Invalid bond token.")  # Raise error for invalid tokens
+    return bond_type
 
 def get_atom_symbol(atom):
     """

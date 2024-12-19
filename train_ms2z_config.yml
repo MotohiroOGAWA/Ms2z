@@ -1,11 +1,12 @@
 file:
-  tree: '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/tensor/vocab_tensors.pt'
-  fp: '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/tensor/fp_tensors.pt'
+  tree: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/tensor/vocab_tensors.pt'
+  fp: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/tensor/fp_tensors.pt'
+  vocab_file: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/vocab.pkl'
 
 train: 
   device: cuda
   batch_size: 32
-  epochs: 5
+  epochs: 100
 
   optimizer:
     name: Adam
@@ -13,7 +14,7 @@ train:
     eps: !!float 1e-8
   criterion: BCEwithLogits
   load_name: 
-  load_epoch: -1 # 0 or null for no load, 1 for load from epoch 1, -1 for load from last epoch
+  load_epoch: null # 0 or null for no load, 1 for load from epoch 1, -1 for load from last epoch
   load_iter: null # null for no load, 100 for load from iter 100, -1 for load from last iter
   train_size: 0.8
   val_size: 0.1
@@ -23,7 +24,7 @@ train:
 
 model:
   vocab_dim: 128
-  latent_dim: 167
+  latent_dim: 256
 
 
 

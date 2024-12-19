@@ -26,6 +26,10 @@ class Embeddings(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.dropout = nn.Dropout(dropout)
 
+    def forward(self, x):
+        # (batch, seq_len) --> (batch, seq_len, embed_dim)
+        return self.dropout(self.embedding(x))
+
 class PositionalEncoder(nn.Module):
     def __init__(self, d_model, max_seq_len = 6000, dropout = 0.1):
         super().__init__()
@@ -42,7 +46,21 @@ class PositionalEncoder(nn.Module):
                 math.cos(pos / (10000 ** ((2 * (i + 1))/d_model)))
         pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
-        
+ 
+    
+    def forward(self, x):
+        # Make embeddings relatively larger
+        x = x * math.sqrt(self.d_model)
+        # Add constant positional encoding to the embedding
+        seq_len = x.size(1)
+        pe = self.pe[:, :seq_len].detach()  # detach() で計算グラフから切り離す
+
+        if x.is_cuda:  # GPU に転送する場合
+            pe = pe.cuda()
+            
+        x = x + pe  # 位置エンコーディングを加算
+        x = self.dropout(x)  # Dropout を適用
+        return x
 
 class FeedForwardBlock(nn.Module):
 
@@ -154,59 +172,6 @@ class MultiHeadAttentionBlock(nn.Module):
 
         # Final linear transformation (batch_size, seq_len, embed_dim)
         return self.w_o(x)
-
-
-# class SelfAttention(nn.Module):
-#     def __init__(self, embed_dim, num_heads, dropout=0.1):
-#         super(SelfAttention, self).__init__()
-#         self.self_attention = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
-
-#     def forward(self, x):
-#         # x: (batch_size, seq_len, embed_dim)
-#         attn_output, attn_weights = self.self_attention(x, x, x)
-#         # attn_output: (batch_size, seq_len, embed_dim)
-#         return attn_output, attn_weights
-
-class EncoderBlock(nn.Module):
-    def __init__(self, embed_dim, num_heads, ff_dim, dropout=0.1):
-        super(EncoderBlock, self).__init__()
-        self.attention = MultiHeadAttentionBlock(embed_dim, num_heads, dropout)
-        self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)  # FeedForwardBlockを使用
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, mask=None):
-        # x: (batch_size, seq_len, embed_dim)
-        
-        # Self-Attention Block
-        attn_output = self.attention(x, x, x, mask)
-        # attn_output: (batch_size, seq_len, embed_dim)
-        x = self.norm1(x + self.dropout(attn_output))
-        # x: (batch_size, seq_len, embed_dim)
-        
-        # Feed Forward Block
-        ff_output = self.feed_forward(x)
-        # ff_output: (batch_size, seq_len, embed_dim)
-        x = self.norm2(x + self.dropout(ff_output))
-        # x: (batch_size, seq_len, embed_dim)
-        
-        return x
-
-class Encoder(nn.Module):
-    def __init__(self, num_layers, embed_dim, num_heads, ff_dim, dropout=0.1):
-        super(Encoder, self).__init__()
-        self.layers = nn.ModuleList([EncoderBlock(embed_dim, num_heads, ff_dim, dropout) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(embed_dim)
-
-    def forward(self, x, mask=None):
-        # x: (batch_size, seq_len, embed_dim)
-        for layer in self.layers:
-            x = layer(x, mask)
-        # 最後に正規化を適用
-        x = self.norm(x)
-        # x: (batch_size, seq_len, embed_dim)
-        return x
 
 
 class DecoderBlock(nn.Module):
