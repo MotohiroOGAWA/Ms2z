@@ -38,6 +38,7 @@ class Vocab:
             print("done")
 
             # get the vocab
+            max_bond_cnt = 0
             self.symbol_to_idx = {symbol:i for i, symbol in enumerate(list(set(frag.mol.GetAtoms()[0].GetSymbol() for frag in monoatomic_fragments)))}
             vocab_dict = {tuple(frag): frag for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
             vocab_tuple_to_graph = {tuple(frag): tuple(self.get_graph(frag)) for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
@@ -47,8 +48,11 @@ class Vocab:
                         fragment = Fragment.parse_fragment_string(frag_strings)
                         if fragment.mol is not None:
                             node_tensor, edge_tensor, frag_bond_tensor = self.get_graph(fragment)
+                            bond_cnt = len(fragment.bond_list)
+
                             vocab_tuple_to_graph[tuple(fragment)] = (node_tensor, edge_tensor, frag_bond_tensor)
                             vocab_dict[tuple(fragment)] = fragment
+                            max_bond_cnt = max(max_bond_cnt, bond_cnt)
                 except Exception as e:
                     print(f"Error: {e}: {frag_strings}")            
             
@@ -56,34 +60,14 @@ class Vocab:
             self.vocab.update({v:i+len(Vocab.TOKENS) for i, v in enumerate(vocab_dict.keys())})
             self._set_token_idx()
 
-            # get the graph
-            self.vocab_idx_to_graph = {}
-            for v, idx in tqdm(self.vocab.items(), desc='VocabToGraph', mininterval=0.5):
+            # bond pos tensor
+            bond_pos_tensor = torch.full((len(self.vocab)+1, max_bond_cnt), -1.0, dtype=torch.float32)
+            for v, idx in tqdm(self.vocab.items(), desc='BondPosFromVocab', mininterval=0.5):
                 if v in Vocab.TOKENS:
-                    node_tensor, edge_tensor, frag_bond_tensor = \
-                        torch.zeros(0), \
-                            torch.zeros(0, 3, dtype=torch.int32), \
-                                torch.zeros(0, 3, dtype=torch.int32)
-                else:
-                    node_tensor, edge_tensor, frag_bond_tensor = vocab_tuple_to_graph[v]
-                
-                self.vocab_idx_to_graph[idx] = (node_tensor, edge_tensor, frag_bond_tensor)
-
-            # # create target tensor
-            # atom_counter_tensors = torch.zeros(len(self.vocab), len(self.symbol_to_idx), dtype=torch.float32)
-            # inner_bond_counter_tensors = torch.zeros(len(self.vocab), 4, dtype=torch.float32)
-            # outer_bond_cnt_tensors = torch.zeros(len(self.vocab), dtype=torch.float32)
-            # for frag_tuple, frag in tqdm(vocab_dict.items(), desc='CreateTargetTensor', mininterval=0.5):
-            #     idx = self.vocab[frag_tuple]
-            #     atom_counter_tensor, inner_bond_counter_tensor, outer_bond_cnt_tensor = \
-            #         self.get_target_tensor(frag)
-            #     atom_counter_tensors[idx] = atom_counter_tensor
-            #     inner_bond_counter_tensors[idx] = inner_bond_counter_tensor
-            #     outer_bond_cnt_tensors[idx] = outer_bond_cnt_tensor
-
-            # self.atom_counter_tensors = atom_counter_tensors
-            # self.inner_bond_counter_tensors = inner_bond_counter_tensors
-            # self.outer_bond_cnt_tensors = outer_bond_cnt_tensors
+                    continue
+                bond_cnt = (len(v)-1)//2
+                bond_pos_tensor[idx, :bond_cnt] = torch.zeros(bond_cnt, dtype=torch.float32)
+            self.bond_pos_tensor = bond_pos_tensor
 
             # build fragment tree
             self.tree = FragmentTree()
@@ -116,7 +100,8 @@ class Vocab:
         data_to_save = {
             'vocab': self.vocab,
             'symbol': self.symbol_to_idx,
-            'graph': self.vocab_idx_to_graph,
+            'bond_pos': self.bond_pos_tensor,
+            # 'graph': self.vocab_idx_to_graph,
             # 'tgt_tensors': (self.atom_counter_tensors, self.inner_bond_counter_tensors, self.outer_bond_cnt_tensors),
             'tree': self.tree.root.to_list(),
             'threshold': self.threshold,
@@ -127,47 +112,23 @@ class Vocab:
     def save(self, path):
         data_to_save = self.get_data_to_save()
         dill.dump(data_to_save, open(path, 'wb'))
-    
-    def calc_loss(self, pred_idx, tgt_idx, device):
-        pred_vocab = self[pred_idx]
-        tgt_vocab = self[tgt_idx]
 
-        if isinstance(pred_vocab, str) or isinstance(tgt_vocab, str):
-            if pred_vocab == tgt_vocab:
-                return torch.tensor(0.0, requires_grad=True, device=device)
-            else:
-                return torch.tensor(1.0, requires_grad=True, device=device)
-        else:
-            if pred_idx in self.idx_to_frag:
-                pred_frag = self.idx_to_frag[pred_idx]
-            else:
-                pred_frag = Fragment.from_tuple(pred_vocab)
-                self.idx_to_frag[pred_idx] = pred_frag
-            if tgt_idx in self.idx_to_frag:
-                tgt_frag = self.idx_to_frag[tgt_idx]
-            else:
-                tgt_frag = Fragment.from_tuple(tgt_vocab)
-                self.idx_to_frag[tgt_idx] = tgt_frag
-
-        if pred_idx == tgt_idx:
-            return torch.tensor(0.0, requires_grad=True, device=device)
-        else:
-            return torch.tensor(1.0, requires_grad=True, device=device)
-    
 
 
     @staticmethod
     def get_vocab_from_data(data):
         vocab_data = data['vocab']
         symbol_data = data['symbol']
-        vocab_idx_to_graph_data = data['graph']
+        bond_pos_data = data['bond_pos']
+        # vocab_idx_to_graph_data = data['graph']
         tree_data = data['tree']
         threshold = data['threshold']
         vocab = Vocab(None, None, threshold)
         vocab.vocab = vocab_data
         vocab._set_token_idx()
         vocab.symbol_to_idx = symbol_data
-        vocab.vocab_idx_to_graph = vocab_idx_to_graph_data
+        vocab.bond_pos_tensor = bond_pos_data
+        # vocab.vocab_idx_to_graph = vocab_idx_to_graph_data
         # vocab.atom_counter_tensors, vocab.inner_bond_counter_tensors, vocab.outer_bond_cnt_tensors = data['tgt_tensors']
         vocab.tree = FragmentTree.from_list(tree_data)
         return vocab
@@ -314,24 +275,30 @@ class Vocab:
         if vocab_tree is None:
             return None
         
-        vocab_tensor = torch.zeros(max_seq_len, dtype=torch.int32)
-        order_tensor = torch.zeros(max_seq_len, 6, dtype=torch.int32) # (parent_idx, parent_bond_pos, bond_pos)
+        vocab_tensor = torch.zeros(max_seq_len, dtype=torch.int64)
+        order_tensor = torch.zeros(max_seq_len, 6, dtype=torch.int64) # (parent_idx, parent_bond_pos, bond_pos)
         mask_tensor =  torch.zeros(max_seq_len, dtype=torch.bool)  # 初期値は False
         mask_tensor[:len(vocab_tree)] = True
 
         parent_data = {}
         parent_data[0] = (-1, -1, -1, -1, -1, -1)
-        for i, vocab in enumerate(vocab_tree):
-            for next_vocab in vocab['next']:
+        sorting_order = [0]
+        num = 0
+        while num < len(vocab_tree):
+            parent_idx = sorting_order[num]
+            num += 1
+            for next_vocab in sorted(vocab_tree[parent_idx]['next'], key=lambda x: x[0]):
                 parent_bond_pos = next_vocab[0]
+                next_idx = next_vocab[2][0]
                 bond_pos = next_vocab[2][1]
-                parent_atom_idx = vocab_tree[i]['frag'][parent_bond_pos*2+1]
-                atom_idx = vocab_tree[next_vocab[2][0]]['frag'][bond_pos*2+1]
+                sorting_order.append(next_idx)
+                parent_atom_idx = vocab_tree[parent_idx]['frag'][parent_bond_pos*2+1]
+                atom_idx = vocab_tree[next_idx]['frag'][bond_pos*2+1]
                 num_bond = token_to_num_bond(next_vocab[1])
-                # (parent_idx, parent_bond_pos, bond_pos, parent_atom_idx, atom_idx, bond_type_num)
-                parent_data[next_vocab[2][0]] = (i, parent_bond_pos, bond_pos, parent_atom_idx, atom_idx, num_bond) 
+                parent_data[sorting_order.index(next_idx)] = (sorting_order.index(parent_idx), parent_bond_pos, bond_pos, parent_atom_idx, atom_idx, num_bond)
 
-        for i, vocab in enumerate(vocab_tree):
+        for i, vocab_i in enumerate(sorting_order):
+            vocab = vocab_tree[vocab_i]
             vocab_tensor[i] = vocab['idx']
             order_tensor[i] = torch.tensor(parent_data[i], dtype=torch.int32)
 
@@ -384,6 +351,19 @@ class Vocab:
         return mol
     
     def get_graph(self, fragment: Fragment):
+            # # get the graph
+            # self.vocab_idx_to_graph = {}
+            # for v, idx in tqdm(self.vocab.items(), desc='VocabToGraph', mininterval=0.5):
+            #     if v in Vocab.TOKENS:
+            #         node_tensor, edge_tensor, frag_bond_tensor = \
+            #             torch.zeros(0), \
+            #                 torch.zeros(0, 3, dtype=torch.int32), \
+            #                     torch.zeros(0, 3, dtype=torch.int32)
+            #     else:
+            #         node_tensor, edge_tensor, frag_bond_tensor = vocab_tuple_to_graph[v]
+                
+            #     self.vocab_idx_to_graph[idx] = (node_tensor, edge_tensor, frag_bond_tensor)
+
         node_tensor = torch.tensor([self.symbol_to_idx[atom.GetSymbol()] for atom in fragment.mol.GetAtoms()], dtype=torch.int32)
         frag_bond_tensor = fragment.get_frag_bond_tensor() #[atom_nums, 3 (fragment bond counter['-', '=', '#'])]
 

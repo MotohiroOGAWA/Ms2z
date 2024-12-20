@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 
@@ -17,6 +18,40 @@ class MzEmbeddings(nn.Module):
         embedding = embedding / norm
         embedding = embedding * intensity.unsqueeze(2)
         return embedding
+
+class FragEmbeddings(nn.Module):
+    def __init__(self, embed_dim: int, vocab_size: int, bond_pos_tensor: torch.Tensor) -> None:
+        super().__init__()
+        assert vocab_size+1 == bond_pos_tensor.size(0), "vocab_size and max_bonds size mismatch"
+
+        self.embed_dim = embed_dim
+        self.vocab_size = vocab_size
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+
+        self.max_bond_cnt = bond_pos_tensor.size(1)
+        self.bond_pos_tensors = bond_pos_tensor
+
+        eye_tensor = torch.eye(self.max_bond_cnt, dtype=torch.float32)
+        eye_tensor = torch.cat([eye_tensor, torch.zeros(1, self.max_bond_cnt, dtype=torch.float32)], dim=0)
+        self.one_hot_pos = nn.Parameter(eye_tensor, requires_grad=False)
+
+        self.bond_position_projection  = nn.Linear(self.max_bond_cnt, embed_dim)
+
+    def forward(self, idx, bond_pos):
+        # (batch, seq_len) --> (batch, seq_len, embed_dim)
+        x = self.calc_embed(idx, bond_pos)
+        return x
+    
+    def calc_embed(self, idx_tensor, bond_pos_tensor):
+        one_hot = self.bond_pos_tensors[idx_tensor] + self.one_hot_pos[bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
+        w = self.bond_position_projection(one_hot) # (batch, seq_len, max_bond_cnt, embed_dim)
+
+        embed = self.embedding(idx_tensor)
+        embed = embed * w
+        return embed
+    
+
+        
     
 class Embeddings(nn.Module):
     def __init__(self, vocab_size: int, embed_dim: int, dropout: float = 0.1) -> None:

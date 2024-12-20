@@ -24,7 +24,7 @@ class Node:
         self.mailbox = defaultdict(lambda: torch.zeros(0))
 
 
-def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix, processor, reverse=False, update_initial_level = False):
+def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix_list, processor, mask_tensor, device, reverse=False, update_initial_level = False):
     """
     Propagate messages through nodes in topological order.
 
@@ -39,75 +39,108 @@ def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix, processor, reverse
         dict: Updated node features after propagation.
     """
     # Check if node features and adjacency matrix dimensions match
-    node_size = None
-    for name, features in node_data.items():
-        if node_size is None:
-            node_size = features.size(0)
-        elif isinstance(features, torch.Tensor) and features.size(0) != node_size:
-            raise ValueError("Node size mismatch.")
-        elif isinstance(features, list) and len(features) != node_size:
-            raise ValueError("Node size mismatch.")
+    # node_size = None
+    batch_size = len(adj_matrix_list)
+    # for name, features in node_data.items():
+    #     if node_size is None:
+    #         node_size = features.size(0)
+    #     elif isinstance(features, torch.Tensor) and features.size(0) != node_size:
+    #         raise ValueError("Node size mismatch.")
+    #     elif isinstance(features, list) and len(features) != node_size:
+    #         raise ValueError("Node size mismatch.")
         
-    if node_size != adj_matrix.size(0) or adj_matrix.size(0) != adj_matrix.size(1):
-        raise ValueError("Node size and adjacency matrix dimensions do not match.")
+    # if node_size != adj_matrix.size(0) or adj_matrix.size(0) != adj_matrix.size(1):
+    #     raise ValueError("Node size and adjacency matrix dimensions do not match.")
 
     # Topological sort grouped by levels
-    levels = topo_sort_levels(adj_matrix, reverse=reverse)
+    # print(1)
+    levels_list = [topo_sort_levels(adj_matrix, reverse=reverse) for adj_matrix in adj_matrix_list]
 
     # Duplicate levels[0] if update_initial_level is True
-    if update_initial_level and len(levels) > 0:
-        levels.insert(0, levels[0])  # Add the initial level again for reprocessing
+    for levels in levels_list:
+        if update_initial_level and len(levels) > 0:
+            levels.insert(0, levels[0])  # Add the initial level again for reprocessing
     
-    parent_to_child_id = defaultdict(list)
+    parent_to_child_id_list = [defaultdict(list) for _ in range(batch_size)]
 
     # Find all edges (parent -> child) using torch.nonzero
-    edges = torch.nonzero(adj_matrix, as_tuple=False)
+    edges_list = [torch.nonzero(adj_matrix, as_tuple=False) for adj_matrix in adj_matrix_list]
 
     # Add relations to the nodes
-    for edge in edges:
-        parent_id, child_id = edge.tolist()
-        if reverse:
-            parent_to_child_id[child_id].append(parent_id)
-        else:
-            parent_to_child_id[parent_id].append(child_id)
+    for i, edges in enumerate(edges_list):
+        for edge in edges:
+            parent_id, child_id = edge.tolist()
+            if reverse:
+                if child_id not in parent_to_child_id_list[i]:
+                    parent_to_child_id_list[i][child_id] = []
+                parent_to_child_id_list[i][child_id].append(parent_id)
+            else:
+                if parent_id not in parent_to_child_id_list[i]:
+                    parent_to_child_id_list[i][parent_id] = []
+                parent_to_child_id_list[i][parent_id].append(child_id)
 
-    nodes = [Node(node_id, {key:value[node_id] for key, value in node_data.items()}) for node_id in range(node_size)]
+    nodes_list = [[Node(node_id, {key:value[node_id] for key, value in node_data.items()}) for node_id in torch.nonzero(mask_tensor[i], as_tuple=False)] for i in range(batch_size)]
 
     # Process nodes level by level
-    result = defaultdict(dict)
-    for n, parent_ids in enumerate(levels):
-        if update_initial_level and n == 0:
-            pair_ids = torch.tensor([[parent_id, parent_id] for parent_id in parent_ids], dtype=torch.int64)
-        else:
-            pair_ids = torch.tensor([[parent_id, child_id] for parent_id in parent_ids for child_id in parent_to_child_id[parent_id]], dtype=torch.int64)
-        
-        if pair_ids.size(0) == 0:
+    result = [defaultdict(dict) for _ in range(batch_size)]
+    finish_flag = torch.zeros(batch_size, dtype=torch.bool)
+    n = -1
+
+    while not torch.all(finish_flag):
+        n += 1
+        pair_ids_list = torch.zeros(0, 3, dtype=torch.int64)
+        for li, levels in enumerate(levels_list):
+            if len(levels) <= n:
+                finish_flag[li] = True
+                continue
+            parent_ids = levels[n]
+            if update_initial_level and n == 0:
+                pair_ids = torch.tensor([[li, parent_id, parent_id] for parent_id in parent_ids], dtype=torch.int64)
+            else:
+                pair_ids = torch.tensor([[li, parent_id, child_id] for parent_id in parent_ids for child_id in parent_to_child_id_list[li][parent_id]], dtype=torch.int64)
+            pair_ids_list = torch.cat((pair_ids_list, pair_ids), dim=0)
+
+        if torch.all(finish_flag):
+            break
+
+        if pair_ids_list.size(0) == 0:
             continue
-        src = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 0].tolist()]) if isinstance(node_data[name], torch.Tensor) else [nodes[i].data[name] for i in pair_ids[:, 0].tolist()] for name, features in node_data.items()}
-        dst = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 1].tolist()]) if isinstance(node_data[name], torch.Tensor) else [nodes[i].data[name] for i in pair_ids[:, 1].tolist()] for name, features in node_data.items()}
+
+        src = {name: torch.stack([features[li,i] for li, i in pair_ids_list[:, [0,1]]]) for name, features in node_data.items()}
+        dst = {name: torch.stack([features[li,i] for li, i in pair_ids_list[:, [0,2]]]) for name, features in node_data.items()}
+        # src = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 0].tolist()]) if isinstance(node_data[name], torch.Tensor) else [nodes[i].data[name] for i in pair_ids[:, 0].tolist()] for name, features in node_data.items()}
+        # dst = {name: torch.stack([nodes[i].data[name] for i in pair_ids[:, 1].tolist()]) if isinstance(node_data[name], torch.Tensor) else [nodes[i].data[name] for i in pair_ids[:, 1].tolist()] for name, features in node_data.items()}
 
         mess_res = processor.message_func(src, dst)
 
-        for i, (parent_id, child_id) in enumerate(pair_ids):
+        for i, (li, parent_id, child_id) in enumerate(pair_ids_list):
             for name, value in mess_res.items():
-                if nodes[child_id].mailbox[name].size(0) == 0:
-                    nodes[child_id].mailbox[name] = value[i].unsqueeze(0)
+                if nodes_list[li][child_id].mailbox[name].size(0) == 0:
+                    nodes_list[li][child_id].mailbox[name] = value[i].unsqueeze(0)
                 else:
-                    nodes[child_id].mailbox[name] = torch.cat((nodes[child_id].mailbox[name], value[i].unsqueeze(0)), dim=0)
+                    nodes_list[li][child_id].mailbox[name] = torch.cat((nodes_list[li][child_id].mailbox[name], value[i].unsqueeze(0)), dim=0)
         
-        child_ids = pair_ids[:,1].unique()
-        for child_id in child_ids:
-            for name, value in processor.reduce_func(nodes[child_id]).items():
-                nodes[child_id].data[name] = value
+        child_ids_list, counts = torch.unique(pair_ids_list[:,[0,2]], dim=0, return_counts=True)
+        max_mail_cnt = torch.max(counts)
+        mailbox = {} # {name: torch.zeros(child_idx, max_mail_cnt, node.shape) for name in node_data.keys()}
+        mask = {}
+        for li, (nodes_id, child_id) in enumerate(child_ids_list):
+            for name, value in nodes_list[nodes_id][child_id].mailbox.items():
+                if name not in mailbox:
+                    mailbox[name] = torch.zeros(child_ids_list.size(0), max_mail_cnt, value.size(-1), device=device)
+                    mask[name] = torch.zeros(child_ids_list.size(0), max_mail_cnt, dtype=torch.bool, device=device)
+                mailbox[name][li, :value.size(0)] = value.to(device)
+                mask[name][li, :value.size(0)] = True
 
-            # Apply node function
-            for name, value in processor.apply_node_func(nodes[child_id]).items():
-                nodes[child_id].data[name] = value
-                result[name][int(child_id)] = value
-    
-    return {name: [res.get(i, None) for i in range(node_size)] for name, res in result.items()}
+        reduce_res = processor.reduce_func(mailbox, mask)
+        apply_res = processor.apply_node_func(reduce_res)
 
-
+        for name, value in apply_res.items():
+            for i, (nodes_id, child_id) in enumerate(child_ids_list):
+                nodes_list[nodes_id][child_id].data[name] = value[i]
+                result[nodes_id][name][child_id.item()] = value[i]
+            
+    return result
 
 def topo_sort_levels(adj_matrix, reverse=False):
     """
