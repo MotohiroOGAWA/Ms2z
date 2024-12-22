@@ -5,7 +5,7 @@ file:
 
 train: 
   device: cuda
-  batch_size: 32
+  batch_size: 4
   epochs: 100
 
   optimizer:
@@ -23,7 +23,8 @@ train:
   save_iter: 100
 
 model:
-  vocab_dim: 128
+  node_dim: 128
+  edge_dim: 64
   latent_dim: 256
 
 

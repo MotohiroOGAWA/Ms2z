@@ -20,6 +20,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
          dataset_save_dir = '',
          save_epoch=1, save_iter=None,
          ):
+    
     os.makedirs(work_dir, exist_ok=True)
 
     if load_name == '' or load_name is None:
@@ -82,7 +83,8 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         model = Ms2z(
             vocab_data=vocab_data,
             max_seq_len=max_seq_len,
-            vocab_embed_dim=model_info['vocab_dim'],
+            node_dim=model_info['node_dim'],
+            edge_dim=model_info['edge_dim'],
             latent_dim=model_info['latent_dim'],
         ).to(device)
 

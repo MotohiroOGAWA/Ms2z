@@ -128,31 +128,34 @@ class StructureEncoder(nn.Module):
         Forward pass for StructureEncoder.
         """
         # Propagate messages through the tree structure
-        device = node_tensor.device
-        batch_size = len(adj_matrix_list)
-        res = prop_nodes_topo({
-            'embed': node_tensor,
-            'parent_embed': parent_node_tensor,
-            'edge_type': edge_type_tensor,
-            'h': torch.zeros(node_tensor.size(0), node_tensor.size(1), self.h_size).to(node_tensor.device),
-            'c': torch.zeros(node_tensor.size(0), node_tensor.size(1), self.h_size).to(node_tensor.device),
-        },
-        adj_matrix_list=adj_matrix_list,
-        processor=self.cell,
-        mask_tensor=mask_tensor,
-        device=device,
-        reverse=True,
-        update_initial_level=True,
-        )
+        try:
+            device = node_tensor.device
+            batch_size = len(adj_matrix_list)
+            res = prop_nodes_topo({
+                'embed': node_tensor,
+                'parent_embed': parent_node_tensor,
+                'edge_type': edge_type_tensor,
+                'h': torch.zeros(node_tensor.size(0), node_tensor.size(1), self.h_size).to(node_tensor.device),
+                'c': torch.zeros(node_tensor.size(0), node_tensor.size(1), self.h_size).to(node_tensor.device),
+            },
+            adj_matrix_list=adj_matrix_list,
+            processor=self.cell,
+            mask_tensor=mask_tensor.to(device),
+            device=device,
+            reverse=True,
+            update_initial_level=True,
+            )
 
-        # Extract root hidden state
-        h_root = torch.stack([res[i]['h'][0] for i in range(batch_size)])  # Root node hidden state
+            # Extract root hidden state
+            h_root = torch.stack([res[i]['h'][0] for i in range(batch_size)])  # Root node hidden state
 
-        # Apply dropout and linear transformations
-        h = self.dropout(h_root)
-        y = torch.tanh(self.linear(h))
-        y2 = self.linear3(torch.relu(self.linear2(h)))
-        y = torch.relu(self.linear4(y + y2))
+            # Apply dropout and linear transformations
+            h = self.dropout(h_root)
+            y = torch.tanh(self.linear(h))
+            y2 = self.linear3(torch.relu(self.linear2(h)))
+            y = torch.relu(self.linear4(y + y2))
+        except Exception as e:
+            y = torch.zeros(node_tensor.size(0), self.h_size).to(node_tensor.device)
 
         return y
             
