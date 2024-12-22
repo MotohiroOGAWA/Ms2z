@@ -29,7 +29,7 @@ class Ms2z(nn.Module):
 
         # Structure encoder
         encoder_h_size = node_dim
-        self.chem_encoder = StructureEncoder(x_size=node_dim, h_size=encoder_h_size)
+        self.chem_encoder = StructureEncoder(node_dim=node_dim, edge_dim=edge_dim, h_size=encoder_h_size)
 
         # Latent sampler
         self.chem_latent_sampler = LatentSampler(input_dim=encoder_h_size, latent_dim=latent_dim)
@@ -37,7 +37,8 @@ class Ms2z(nn.Module):
 
         # Transformer decoder
         self.decoder = Decoder(decoder_layers, node_dim, edge_dim, decoder_heads, decoder_ff_dim, decoder_dropout)
-        self.output_word_layer = nn.Linear(node_dim, self.node_dim)
+        self.output_word_layer = nn.Linear(node_dim, self.vocab_size)
+        self.output_joint_layer = nn.Linear(node_dim, self.vocab_embedding.max_bond_cnt)
 
     def forward(self, vocab_tensor, order_tensor, mask_tensor):
         """
@@ -63,15 +64,6 @@ class Ms2z(nn.Module):
             order_tensor[:,:,1],  # Retain original values where mask_tensor is True
             torch.tensor(-1, dtype=order_tensor.dtype)  # Replace with self.vocab.pad where mask_tensor is False
         )
-        z, mean, log_var = self.calc_chem_z(vocab_tensor, order_tensor, mask_tensor)
-
-        # Transformer decoder
-        memory = z.unsqueeze(1) # [batch_size, 1, latent_dim]
-        memory = self.linear(memory)
-
-        # Decode using Transformer Decoder
-        memory_mask = torch.zeros(memory.size(0), memory.size(1), dtype=torch.bool).to(memory.device)
-        memory_mask[:, 0] = True
 
         # Update vocab_tensor using mask_tensor to insert eos and pad tokens
         input_tensor = torch.cat([
@@ -98,13 +90,25 @@ class Ms2z(nn.Module):
         edge_index = torch.cat([padding,edge_index+1], dim=1) # [batch_size, seq_len]
         root_bond_pos_tensor = torch.cat([padding, order_tensor[:,:,2]], dim=1)
         joint_bond_pos_tensor = torch.cat([padding, order_tensor[:,:,1]], dim=1)
-
-
-        # Decoder
+        
         node_embed = self.vocab_embedding(input_tensor, root_bond_pos_tensor)  # Embed vocabulary tensor
         edge_attr = self.vocab_embedding.joint_embed(input_tensor, root_bond_pos_tensor, joint_bond_pos_tensor) # [batch_size, seq_len+1, edge_dim]
         unk_nodes = self.vocab_embedding(self.unk) # [node_dim]
 
+
+        # Calculate latent variable
+        z, mean, log_var = self.calc_chem_z(node_embed[:,1:], edge_attr[:,1:], order_tensor, mask_tensor)
+
+        # Transformer decoder
+        memory = z.unsqueeze(1) # [batch_size, 1, latent_dim]
+        memory = self.linear(memory)
+
+        # Decode using Transformer Decoder
+        memory_mask = torch.zeros(memory.size(0), memory.size(1), dtype=torch.bool).to(memory.device)
+        memory_mask[:, 0] = True
+
+
+        # Decoder
         decoder_output = self.decoder(
             x=node_embed,
             edge_index=edge_index,
@@ -113,28 +117,36 @@ class Ms2z(nn.Module):
             unk_feature=unk_nodes,
             tgt_mask=mask_tensor_ex,
             memory_mask=memory_mask
-        )
-        word_embeddings = self.output_word_layer(decoder_output)  # Shape: [batch_size, seq_len, vocab_embed_dim]
-        word_embeddings_flat = word_embeddings.view(-1, self.node_dim)
+        ) # Shape: [batch_size, seq_len, node_dim]
+        word_embeddings_flat = decoder_output.view(-1, decoder_output.size(-1))
 
+        
+        tgt_flat = target_tensor.view(-1)
         tgt_bond_pos_tensor = torch.cat([order_tensor[:,:,2], padding], dim=1)
-        tgt_word_embeddings = self.vocab_embedding(target_tensor, tgt_bond_pos_tensor)
-        tgt_word_embeddings_flat = tgt_word_embeddings.view(-1, self.node_dim)
-        valid_mask = target_tensor.view(-1) != self.vocab.pad
+        tgt_bond_pos_flat = tgt_bond_pos_tensor.view(-1)
+        # tgt_word_embeddings = self.vocab_embedding(target_tensor, tgt_bond_pos_tensor)
+        # tgt_word_embeddings_flat = tgt_word_embeddings.view(-1, self.node_dim)
+        valid_mask = tgt_flat != self.vocab.pad
 
         word_embeddings_flat = word_embeddings_flat[valid_mask]
-        tgt_word_embeddings_flat = tgt_word_embeddings_flat[valid_mask]
+        tgt_flat = tgt_flat[valid_mask]
+        tgt_bond_pos_flat = tgt_bond_pos_flat[valid_mask]
+        
+        logits_vocab = self.output_word_layer(word_embeddings_flat)
+        logits_bond_pos = self.output_joint_layer(word_embeddings_flat)
 
-        # Calculate loss components
-        token_mismatch_loss = nn.MSELoss()(word_embeddings_flat, tgt_word_embeddings_flat)
+        loss_fn1 = nn.CrossEntropyLoss(ignore_index=self.vocab.pad)
+        loss_fn2 = nn.CrossEntropyLoss(ignore_index=-1)
+        token_prediction_loss = loss_fn1(logits_vocab, tgt_flat)
+        bond_pos_prediction_loss = loss_fn2(logits_bond_pos, tgt_bond_pos_flat)
 
         # KL Divergence loss
         kl_divergence_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
         kl_divergence_loss /= mean.size(0)  # Normalize by batch size
 
-        return token_mismatch_loss, kl_divergence_loss
+        return token_prediction_loss, bond_pos_prediction_loss, kl_divergence_loss
 
-    def calc_chem_z(self, vocab_tensor, order_tensor, mask_tensor):
+    def calc_chem_z(self, embed_node, edge_attr, order_tensor, mask_tensor):
         """
         Calculate the latent variable for a given input.
 
@@ -146,42 +158,13 @@ class Ms2z(nn.Module):
         Returns:
             z (torch.Tensor): Sampled latent variable.
         """
-        # Embed the input vocabulary
-        # Replace vocab_tensor values where mask_tensor is False with self.vocab.pad
-        vocab_tensor = torch.where(
-            mask_tensor,
-            vocab_tensor,  # Retain original values where mask_tensor is True
-            torch.full_like(vocab_tensor, self.vocab.pad)  # Replace with self.vocab.pad where mask_tensor is False
-        )
-        bond_pos_tensor = order_tensor[:,:,2]
-        vocab_emb = self.vocab_embedding(vocab_tensor, bond_pos_tensor)
 
-
-        # Clamp indices to valid range
-        order_indices = order_tensor[..., 0].to(dtype=torch.int64)
-        order_indices = torch.where(order_indices == -1, torch.full_like(order_indices, self.vocab.bos), order_indices)
-        parent_idx_tensor = torch.where(
-            mask_tensor,
-            vocab_tensor.gather(1, order_indices),  # Gather values within range
-            torch.full_like(mask_tensor, self.vocab.pad, dtype=torch.long)  # Padding value
-        )
-        parent_idx_tensor[:, 0] = self.vocab.bos
-
-        parent_bond_pos_tensor = order_tensor[:,:,1]
-        parent_vocab_emb = self.vocab_embedding(parent_idx_tensor, parent_bond_pos_tensor)
-
-
-        # edge_type
-        indices = (order_tensor[:,:,5] - 1).clamp(min=-1)
-        edge_type_tensor = torch.zeros((*indices.shape, 3), device=indices.device)
-        valid_mask = indices != -1
-        edge_type_tensor[valid_mask] = F.one_hot(indices[valid_mask].to(torch.int64), num_classes=3).float()
-
+        
         # Convert orders and masks into adjacency matrices
         adj_matrix_list = [order_to_adj_matrix(order[:, 0], mask) for order, mask in zip(order_tensor, mask_tensor)]
 
         # Pass through structure encoder
-        encoder_output = self.chem_encoder(vocab_emb, parent_vocab_emb, edge_type_tensor, adj_matrix_list, mask_tensor)
+        encoder_output = self.chem_encoder(embed_node, edge_attr, adj_matrix_list, mask_tensor)
 
         # Sample from latent space
         z, mean, log_var = self.chem_latent_sampler(encoder_output)

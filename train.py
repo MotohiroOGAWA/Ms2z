@@ -113,9 +113,9 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
             # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-            token_mismatch_loss, kl_divergence_loss = \
+            token_loss, bp_loss, kl_divergence_loss = \
                 model(tree_tensor, order_tensor, mask_tensor)
-            loss = token_mismatch_loss + kl_divergence_loss
+            loss = token_loss + 0.5 * bp_loss + kl_divergence_loss
 
             loss.backward()
             optimizer.step()
@@ -128,14 +128,32 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             #         print(f"Parameter '{name}' was NOT updated.")
 
             global_step += 1
-
-            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}"})
+    
+            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}", 'token': f"{token_loss.item():6.3f}", 'bp': f"{bp_loss.item():6.3f}", 'KL': f"{kl_divergence_loss.item():6.3f}"})
 
             current_time = time.time() - start_time
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
-                loss_type=criterion_name, target_name='Fingerprint', loss_value=loss.item(), 
+                loss_type=criterion_name, target_name='TotalLoss', loss_value=loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type=criterion_name, target_name='TokenLoss', loss_value=token_loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type=criterion_name, target_name='BondPosLoss', loss_value=bp_loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type=criterion_name, target_name='KL_divergence_loss', loss_value=kl_divergence_loss.item(), 
                 data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
 
@@ -168,6 +186,9 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 def run_validation(model, val_dataloader, criterion, logger, global_step, epoch, timestamp=None):
     model.eval()
     val_loss = 0
+    val_token_loss = 0
+    val_bp_loss = 0
+    val_kl_loss = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -177,21 +198,46 @@ def run_validation(model, val_dataloader, criterion, logger, global_step, epoch,
             mask_tensor = batch['mask'].to(device)
             # fp_tensor = batch['fp'].to(device)
 
-            token_mismatch_loss, kl_divergence_loss = \
+            token_mismatch_loss, bp_loss, kl_divergence_loss = \
                 model(tree_tensor, order_tensor, mask_tensor)
             
-            loss = token_mismatch_loss + kl_divergence_loss
+            loss = token_mismatch_loss + 0.5 * bp_loss + kl_divergence_loss
             samples = tree_tensor.shape[0]
 
             total_samples += samples
             val_loss += loss.item() * samples
+            val_token_loss += token_mismatch_loss.item() * samples
+            val_bp_loss += bp_loss.item() * samples
+            val_kl_loss += kl_divergence_loss.item() * samples
 
 
     avg_val_loss = val_loss / total_samples
+    avg_val_token_loss = val_token_loss / total_samples
+    avg_val_bp_loss = val_bp_loss / total_samples
+    avg_val_kl_loss = val_kl_loss / total_samples
+
     logger.log(
         "validation", 
         epoch=epoch, global_step=global_step, 
-        loss_type="", target_name='Fingerprint', loss_value=avg_val_loss, 
+        loss_type="", target_name='ValLoss', loss_value=avg_val_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type="", target_name='TokenLoss', loss_value=avg_val_token_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type="", target_name='BondPosLoss', loss_value=avg_val_bp_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type="", target_name='KL_divergence_loss', loss_value=avg_val_kl_loss, 
         data_size=total_samples, accuracy=None, 
         learning_rate=None, timestamp=timestamp)
     model.train()

@@ -79,17 +79,7 @@ def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix_list, processor, ma
                     parent_to_child_id_list[i][parent_id] = []
                 parent_to_child_id_list[i][parent_id].append(child_id)
 
-    nodes_list = [[Node(node_id, {key:value[node_id] for key, value in node_data.items()}) for node_id in torch.nonzero(mask_tensor[i], as_tuple=False)] for i in range(batch_size)]
-    # nodes_list = []
-    # try:
-    #     for i in range(batch_size):
-    #         nodes = []
-    #         for node_id in torch.nonzero(mask_tensor[i], as_tuple=False):
-    #             node_attributes = {key: value[node_id] for key, value in node_data.items()}
-    #             nodes.append(Node(node_id, node_attributes))
-    #         nodes_list.append(nodes)
-    # except:
-    #     pass
+    nodes_list = [[Node(node_id, {key:value[i][node_id] for key, value in node_data.items()}) for node_id in torch.nonzero(mask_tensor[i], as_tuple=False)] for i in range(batch_size)]
 
     # Process nodes level by level
     result = [defaultdict(dict) for _ in range(batch_size)]

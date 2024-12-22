@@ -5,8 +5,8 @@ file:
 
 train: 
   device: cuda
-  batch_size: 4
-  epochs: 100
+  batch_size: 16
+  epochs: 1000
 
   optimizer:
     name: Adam
@@ -19,8 +19,8 @@ train:
   train_size: 0.8
   val_size: 0.1
   test_size: 0.1
-  save_epoch: 3
-  save_iter: 100
+  save_epoch: 1
+  save_iter: null
 
 model:
   node_dim: 128

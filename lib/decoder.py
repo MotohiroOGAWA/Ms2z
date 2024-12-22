@@ -195,43 +195,6 @@ class GATLayer(nn.Module):
         else:
             return h_prime_agg, _valid_edges
 
-class HierGATBlock(nn.Module):
-    def __init__(self, embed_dim, edge_dim, heads, ff_dim, dropout=0.1):
-        super(HierGATBlock, self).__init__()
-        self.gat = GATLayer(embed_dim, embed_dim, edge_dim)
-        self.self_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
-        self.enc_dec_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
-                
-        # Feed Forward Block
-        self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
-
-        # Layer Normalization
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.norm3 = nn.LayerNorm(embed_dim)
-        self.norm4 = nn.LayerNorm(embed_dim)
-        
-        # Dropout
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, edge_index, edge_attr, enc_output, node_mask, edge_mask, _valid_edges=None):
-        # Shape of x [batch_size, seq_len, in_features]
-        # Shape of unk_feature [in_features]
-        # Shape of enc_output [batch_size, 1, dim]
-        x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
-        x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
-
-        x = self.self_attention(x, x, x, node_mask)
-        x = self.norm2(x + self.dropout(x))
-
-        x = self.enc_dec_attention(x, enc_output, enc_output, node_mask)
-        x = self.norm3(x + self.dropout(x))
-
-        x = self.feed_forward(x)
-        x = self.norm4(x + self.dropout(x))
-
-        return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
-    
     @staticmethod
     def expand_data(x:torch.Tensor, edge_index:torch.Tensor, edge_attr: torch.Tensor, unk_feature:torch.Tensor, mask:torch.Tensor=None):
         """
@@ -255,7 +218,7 @@ class HierGATBlock(nn.Module):
         batch_size, seq_len, in_features = x.size()
 
         # Create a lower-triangular mask for attention (expand_mask)
-        expand_mask = HierGATBlock.create_expand_mask(mask, fill=True) # Shape: [batch_size, seq_len, seq_len]
+        expand_mask = GATLayer.create_expand_mask(mask, fill=True) # Shape: [batch_size, seq_len, seq_len]
         
         # Expand node_features to match the expanded mask's dimensions
         ex_x = x.unsqueeze(1).expand(-1, seq_len, -1, -1)  # Expand x to [batch_size, seq_len, seq_len, in_features]
@@ -264,7 +227,7 @@ class HierGATBlock(nn.Module):
         ex_x = torch.cat([ex_x, torch.zeros(batch_size, seq_len, 1, in_features, device=x.device)], dim=2) # Shape: [batch_size, seq_len, seq_len+1, in_features]
 
         # Expand the unknown feature tensor based on the diagonal mask
-        expand_diagonal_mask = HierGATBlock.create_expand_mask(mask, fill=False)  # Expand mask to [batch_size, seq_len, seq_len]
+        expand_diagonal_mask = GATLayer.create_expand_mask(mask, fill=False)  # Expand mask to [batch_size, seq_len, seq_len]
         expand_unk = torch.where(expand_diagonal_mask.unsqueeze(-1), unk_feature.view(1, 1, 1, -1), torch.zeros_like(unk_feature).view(1, 1, 1, -1))
         # Append an additional dimension for future expansion
         expand_unk = torch.cat([torch.zeros(batch_size, seq_len, 1, in_features, device=x.device), expand_unk], dim=2) # Shape: [batch_size, seq_len, seq_len+1, in_features]
@@ -281,7 +244,7 @@ class HierGATBlock(nn.Module):
         src = torch.roll(edge_index, shifts=-1, dims=1)  # Shape: [batch_size, seq_len]
         tgt = torch.where(edge_mask, torch.arange(1, seq_len + 1, dtype=edge_index.dtype, device=edge_index.device).repeat(batch_size, 1), -1)  # Shape: [batch_size, seq_len]
         
-        ex_edge_mask = HierGATBlock.create_expand_mask(edge_mask, fill=True) # Shape: [batch_size, seq_len, seq_len]
+        ex_edge_mask = GATLayer.create_expand_mask(edge_mask, fill=True) # Shape: [batch_size, seq_len, seq_len]
         ex_src = torch.where(ex_edge_mask, src.unsqueeze(1).expand(-1, seq_len, -1), torch.full_like(ex_edge_mask, -1, dtype=edge_index.dtype))  # Shape: [batch_size, seq_len, seq_len]
         ex_tgt = torch.where(ex_edge_mask, tgt.unsqueeze(1).expand(-1, seq_len, -1), torch.full_like(ex_edge_mask, -1, dtype=edge_index.dtype))  # Shape: [batch_size, seq_len, seq_len]
 
@@ -323,6 +286,78 @@ class HierGATBlock(nn.Module):
         # Combine with the future mask
         expand_mask = expand_mask & seq_mask
         return expand_mask
+
+
+
+class HierGATBlock(nn.Module):
+    def __init__(self, embed_dim, edge_dim, heads, ff_dim, dropout=0.1):
+        super(HierGATBlock, self).__init__()
+        self.gat = GATLayer(embed_dim, embed_dim, edge_dim)
+        self.self_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
+        self.enc_dec_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
+                
+        # Feed Forward Block
+        self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
+
+        # Layer Normalization
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm3 = nn.LayerNorm(embed_dim)
+        self.norm4 = nn.LayerNorm(embed_dim)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, edge_index, edge_attr, enc_output, node_mask, edge_mask, _valid_edges=None):
+        # Shape of x [batch_size, seq_len, in_features]
+        # Shape of unk_feature [in_features]
+        # Shape of enc_output [batch_size, 1, dim]
+        x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
+        x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
+
+        x = self.self_attention(x, x, x, node_mask)
+        x = self.norm2(x + self.dropout(x))
+
+        x = self.enc_dec_attention(x, enc_output, enc_output, node_mask)
+        x = self.norm3(x + self.dropout(x))
+
+        x = self.feed_forward(x)
+        x = self.norm4(x + self.dropout(x))
+
+        return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
+    
+class SelfGATBlock(nn.Module):
+    def __init__(self, embed_dim, edge_dim, heads, ff_dim, dropout=0.1):
+        super(SelfGATBlock, self).__init__()
+        self.gat = GATLayer(embed_dim, embed_dim, edge_dim)
+        self.self_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
+                
+        # Feed Forward Block
+        self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
+
+        # Layer Normalization
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm3 = nn.LayerNorm(embed_dim)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges=None):
+        # Shape of x [batch_size, seq_len, in_features]
+        # Shape of unk_feature [in_features]
+        # Shape of enc_output [batch_size, 1, dim]
+        x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
+        x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
+
+        x = self.self_attention(x, x, x, node_mask)
+        x = self.norm2(x + self.dropout(x))
+
+        x = self.feed_forward(x)
+        x = self.norm3(x + self.dropout(x))
+
+        return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
+    
 
 class MultiHeadAttentionBlock(nn.Module):
     def __init__(self, embed_dim: int, h: int, dropout: float) -> None:
@@ -439,7 +474,7 @@ class Decoder(nn.Module):
         # x: (batch_size, tgt_seq_len, embed_dim)
         # enc_output: (batch_size, src_seq_len, embed_dim)
 
-        x, edge_index, edge_attr, node_mask, edge_mask = HierGATBlock.expand_data(x, edge_index, edge_attr, unk_feature, tgt_mask)
+        x, edge_index, edge_attr, node_mask, edge_mask = GATLayer.expand_data(x, edge_index, edge_attr, unk_feature, tgt_mask)
         enc_output = enc_output.unsqueeze(2).expand(-1, -1, enc_output.size(1), -1) # Expand enc_output to match the dimensions of x
         _valid_edges = None
         for layer in self.layers:
