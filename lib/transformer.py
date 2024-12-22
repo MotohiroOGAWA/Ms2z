@@ -36,20 +36,25 @@ class FragEmbeddings(nn.Module):
         self.one_hot_pos = nn.Parameter(eye_tensor, requires_grad=False)
 
         self.bond_position_projection  = nn.Linear(self.max_bond_cnt, embed_dim)
+        self.joint_projection = nn.Linear(embed_dim*2, embed_dim)
 
-    def forward(self, idx, bond_pos):
+    def forward(self, idx, root_bond_pos):
         # (batch, seq_len) --> (batch, seq_len, embed_dim)
-        x = self.calc_embed(idx, bond_pos)
+        x = self.calc_embed(idx, root_bond_pos)
         return x
     
-    def calc_embed(self, idx_tensor, bond_pos_tensor):
-        one_hot = self.bond_pos_tensors[idx_tensor] + self.one_hot_pos[bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
+    def calc_embed(self, idx_tensor, root_bond_pos_tensor):
+        one_hot = self.bond_pos_tensors[idx_tensor] + self.one_hot_pos[root_bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
         w = self.bond_position_projection(one_hot) # (batch, seq_len, max_bond_cnt, embed_dim)
 
         embed = self.embedding(idx_tensor)
         embed = embed * w
         return embed
     
+    def joint_embed(self, idx_tensor, root_bond_pos_tensor, bond_pos_tensor):
+        x = self.calc_embed(idx_tensor, root_bond_pos_tensor)
+        one_hot = self.bond_pos_tensors[idx_tensor] + self.one_hot_pos[bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
+
 
         
     

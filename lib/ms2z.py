@@ -83,6 +83,8 @@ class Ms2z(nn.Module):
                 input_tensor[i, first_eos_index:] = self.vocab.pad  
 
         
+        tse = torch.zeros(32, 100, 100, 3, device=memory.device, dtype=torch.int32)
+
         # Process input sequence through the decoder
         padding = torch.empty(mask_tensor.size(0), 1, device=mask_tensor.device, dtype=torch.int32)
         padding.fill_(-1)
