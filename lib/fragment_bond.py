@@ -7,7 +7,7 @@ class FragmentBond:
         self.atom_idx = atom_idx
         self.token = bond_token
         self.type = token_to_chem_bond(bond_token)
-        self.num = token_to_num_bond(bond_token, aromatic_as_half=False)
+        self.num = token_to_num_bond(bond_token, aromatic_as_half=False) # '-' -> 1, '=' -> 2, '#' -> 3, ':' -> 1.5
 
     def __str__(self):
         return f"({self.atom_idx}, {self.token})"

@@ -8,7 +8,7 @@ import numpy as np
 import dill
 
 from lib.torch_utils import load_dataset, get_optimizer, get_criterion, save_dataset, save_model, load_model
-from lib.data_pipeline import get_ds
+from mnt.model.data_pipeline import get_ds
 from lib.ms2z import Ms2z
 from lib.logger import TSVLogger
 
@@ -16,7 +16,6 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
          train_size, val_size, test_size,
          model_info,
          optimizer_info={'name':'Adam', 'lr':0.01, 'eps':0.00000001},
-         criterion_name='MSELoss',
          dataset_save_dir = '',
          save_epoch=1, save_iter=None,
          ):
@@ -25,7 +24,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
     if load_name == '' or load_name is None:
         # load_name = 'ckp' + datetime.now().strftime("%Y%m%d%H%M%S")
-        load_name = 'ckp' + 'test1217'
+        load_name = 'ckp' + 'test1224'
     
     load_dir = os.path.join(work_dir, 'projects', load_name)
     if not os.path.exists(load_dir):
@@ -47,29 +46,29 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     # Create a new model if load_epoch = 0
     else:
         input_file = files['tree']
-        target_file = files['fp']
 
         input_tensor = torch.load(input_file)
-        target_tensor = torch.load(target_file)
 
-        vocab_tensor = input_tensor['vocab']
+        token_tensor = input_tensor['vocab']
         order_tensor = input_tensor['order']
         mask_tensor = input_tensor['mask']
         max_seq_len = input_tensor['length']
         vocab_size = input_tensor['vocab_size']
+        fingerprint_tensor = input_tensor['fingerprints']
+        fp_dim = input_tensor['fp_size']
         
         variables = {
-            'vocab': vocab_tensor,
+            'token': token_tensor,
             'order': order_tensor,
             'mask': mask_tensor,
-            'fp': target_tensor
+            'fp': fingerprint_tensor
         }
         dataset, train_dataloader, val_dataloader, test_dataloader \
               = get_ds(variables, mode='train', batch_size=batch_size, 
                         train_size=train_size, val_size=val_size, test_size=test_size,
-                       device=device)
-        if dataset_save_dir == '':
-            dataset_save_dir = os.path.join(load_dir, 'ds')
+                       device=torch.device('cpu'))
+        # if dataset_save_dir == '':
+        #     dataset_save_dir = os.path.join(load_dir, 'ds')
         save_dataset(load_dir, dataset, train_dataloader, val_dataloader, test_dataloader)
 
         load_epoch = 0
@@ -86,13 +85,18 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             node_dim=model_info['node_dim'],
             edge_dim=model_info['edge_dim'],
             latent_dim=model_info['latent_dim'],
+            decoder_layers=model_info['decoder_layers'],
+            decoder_heads=model_info['decoder_heads'],
+            decoder_ff_dim=model_info['decoder_ff_dim'],
+            decoder_dropout=model_info['decoder_dropout'],
+            fp_dim=fp_dim,
         ).to(device)
 
         # define optimizer
         optimizer = get_optimizer(model, optimizer_info)
 
     # define loss function (criterion)
-    criterion = get_criterion(criterion_name)
+    # criterion = get_criterion(criterion_name)
 
 
     print(f"train size: {len(train_dataloader.dataset)}, val size: {len(val_dataloader.dataset)}")  
@@ -109,13 +113,16 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             tree_tensor = batch['vocab'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
-            # fp_tensor = batch['fp'].to(device)
+            fp_tensor = batch['fp'].to(device)
 
             # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-            token_loss, bp_loss, kl_divergence_loss = \
-                model(tree_tensor, order_tensor, mask_tensor)
-            loss = token_loss + 0.5 * bp_loss + kl_divergence_loss
+            token_loss, bp_loss, kl_divergence_loss, fp_loss, \
+                 atom_counter_loss, inner_bond_counter_loss, outer_bond_cnt_loss = \
+                model(tree_tensor, order_tensor, mask_tensor, fp_tensor)
+            # loss = token_loss + 0.5 * bp_loss + kl_divergence_loss + fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
+            # loss = fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
+            loss = fp_loss + kl_divergence_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
 
             loss.backward()
             optimizer.step()
@@ -129,31 +136,61 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
             global_step += 1
     
-            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}", 'token': f"{token_loss.item():6.3f}", 'bp': f"{bp_loss.item():6.3f}", 'KL': f"{kl_divergence_loss.item():6.3f}"})
+            batch_iterator.set_postfix({
+                # "loss": f"{loss.item():6.3f}", 'token': f"{token_loss.item():6.3f}", 
+                # 'bp': f"{bp_loss.item():6.3f}", 'KL': f"{kl_divergence_loss.item():6.3f}", 
+                'FP': f"{fp_loss.item():6.3f}",
+                'ac': f"{atom_counter_loss.item():6.3f}",
+                'ibc': f"{inner_bond_counter_loss.item():6.3f}",
+                'obc': f"{outer_bond_cnt_loss.item():6.3f}"})
 
             current_time = time.time() - start_time
+            # logger.log(
+            #     "train", 
+            #     epoch=epoch+1, global_step=global_step, 
+            #     loss_type='', target_name='TotalLoss', loss_value=loss.item(), 
+            #     data_size=tree_tensor.shape[0], accuracy=None, 
+            #     learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            # logger.log(
+            #     "train", 
+            #     epoch=epoch+1, global_step=global_step, 
+            #     loss_type='', target_name='TokenLoss', loss_value=token_loss.item(), 
+            #     data_size=tree_tensor.shape[0], accuracy=None, 
+            #     learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            # logger.log(
+            #     "train", 
+            #     epoch=epoch+1, global_step=global_step, 
+            #     loss_type='', target_name='BondPosLoss', loss_value=bp_loss.item(), 
+            #     data_size=tree_tensor.shape[0], accuracy=None, 
+            #     learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
-                loss_type=criterion_name, target_name='TotalLoss', loss_value=loss.item(), 
+                loss_type='', target_name='KL_divergence_loss', loss_value=kl_divergence_loss.item(), 
                 data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
-                loss_type=criterion_name, target_name='TokenLoss', loss_value=token_loss.item(), 
+                loss_type='BCELoss', target_name='fingerprint', loss_value=fp_loss.item(), 
                 data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
-                loss_type=criterion_name, target_name='BondPosLoss', loss_value=bp_loss.item(), 
+                loss_type='MSELoss', target_name='atom_counter', loss_value=atom_counter_loss.item(), 
                 data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
-                loss_type=criterion_name, target_name='KL_divergence_loss', loss_value=kl_divergence_loss.item(), 
+                loss_type='MSELoss', target_name='inner_bond_counter', loss_value=inner_bond_counter_loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type='MSELoss', target_name='outer_bond_cnt', loss_value=outer_bond_cnt_loss.item(), 
                 data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
 
@@ -165,9 +202,9 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                 print(f"Model and optimizer saved at {save_path}")
                 
         # Validation
-        val_loss = run_validation(model, val_dataloader, criterion, logger, global_step, epoch+1, timestamp=current_time)
-        val_loss_list = np.append(val_loss_list, val_loss)
-        print(f"Validation Loss after epoch {epoch+1}: {val_loss}")
+        # val_loss = run_validation(model, val_dataloader, logger, global_step, epoch+1, timestamp=current_time)
+        # val_loss_list = np.append(val_loss_list, val_loss)
+        # print(f"Validation Loss after epoch {epoch+1}: {val_loss}")
         
         # Save the model and optimizer
         if save_epoch is not None and (epoch+1) % save_epoch == 0:
@@ -183,12 +220,16 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             epoch_zero_fill=len(str(max_epoch))+1, iter_zero_fill=len(str(int(max_epoch*len(dataset)/batch_size)))+1)
         print(f"Model and optimizer saved at {save_path}")
 
-def run_validation(model, val_dataloader, criterion, logger, global_step, epoch, timestamp=None):
+def run_validation(model, val_dataloader, logger, global_step, epoch, timestamp=None):
     model.eval()
     val_loss = 0
     val_token_loss = 0
     val_bp_loss = 0
     val_kl_loss = 0
+    val_fp_loss = 0
+    val_atom_counter_loss = 0
+    val_inner_bond_counter_loss = 0
+    val_outer_bond_cnt_loss = 0
     total_samples = 0
 
     with torch.no_grad():
@@ -196,12 +237,13 @@ def run_validation(model, val_dataloader, criterion, logger, global_step, epoch,
             tree_tensor = batch['vocab'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
-            # fp_tensor = batch['fp'].to(device)
+            fp_tensor = batch['fp'].to(device)
 
-            token_mismatch_loss, bp_loss, kl_divergence_loss = \
-                model(tree_tensor, order_tensor, mask_tensor)
+            token_mismatch_loss, bp_loss, kl_divergence_loss, fp_loss, \
+                atom_counter_loss, inner_bond_counter_loss, outer_bond_cnt_loss  = \
+                    model(tree_tensor, order_tensor, mask_tensor, fp_tensor)
             
-            loss = token_mismatch_loss + 0.5 * bp_loss + kl_divergence_loss
+            loss = token_mismatch_loss + 0.5 * bp_loss + kl_divergence_loss + fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
             samples = tree_tensor.shape[0]
 
             total_samples += samples
@@ -209,12 +251,20 @@ def run_validation(model, val_dataloader, criterion, logger, global_step, epoch,
             val_token_loss += token_mismatch_loss.item() * samples
             val_bp_loss += bp_loss.item() * samples
             val_kl_loss += kl_divergence_loss.item() * samples
+            val_fp_loss += fp_loss.item() * samples
+            val_atom_counter_loss += atom_counter_loss.item() * samples
+            val_inner_bond_counter_loss += inner_bond_counter_loss.item() * samples
+            val_outer_bond_cnt_loss += outer_bond_cnt_loss.item() * samples
 
 
     avg_val_loss = val_loss / total_samples
     avg_val_token_loss = val_token_loss / total_samples
     avg_val_bp_loss = val_bp_loss / total_samples
     avg_val_kl_loss = val_kl_loss / total_samples
+    avg_val_fp_loss = val_fp_loss / total_samples
+    avg_val_atom_counter_loss = val_atom_counter_loss / total_samples
+    avg_val_inner_bond_counter_loss = val_inner_bond_counter_loss / total_samples
+    avg_val_outer_bond_cnt_loss = val_outer_bond_cnt_loss / total_samples
 
     logger.log(
         "validation", 
@@ -238,6 +288,30 @@ def run_validation(model, val_dataloader, criterion, logger, global_step, epoch,
         "validation", 
         epoch=epoch, global_step=global_step, 
         loss_type="", target_name='KL_divergence_loss', loss_value=avg_val_kl_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type='BCELoss', target_name='fingerprint', loss_value=avg_val_fp_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type='MSELoss', target_name='atom_counter', loss_value=avg_val_atom_counter_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type='MSELoss', target_name='inner_bond_counter', loss_value=avg_val_inner_bond_counter_loss, 
+        data_size=total_samples, accuracy=None, 
+        learning_rate=None, timestamp=timestamp)
+    logger.log(
+        "validation", 
+        epoch=epoch, global_step=global_step, 
+        loss_type='MSELoss', target_name='outer_bond_cnt', loss_value=avg_val_outer_bond_cnt_loss, 
         data_size=total_samples, accuracy=None, 
         learning_rate=None, timestamp=timestamp)
     model.train()
@@ -280,7 +354,6 @@ if __name__ == '__main__':
         config['train']['test_size'],
         model_info=config['model'],
         optimizer_info=config['train']['optimizer'],
-        criterion_name=config['train']['criterion'],
         dataset_save_dir = args.dataset_save_dir,
         save_epoch=config['train']['save_epoch'],
         save_iter=config['train']['save_iter'],

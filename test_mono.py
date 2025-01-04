@@ -4,10 +4,10 @@ from tqdm import tqdm
 import os
 import torch
 
-from model.utils import *
-from model.fragment import Fragment
-from model.fragment_bond import *
-from model.vocab import Vocab
+from lib.utils import *
+from lib.fragment import Fragment
+from lib.fragment_bond import *
+from lib.vocab import Vocab
 
 
 
@@ -15,20 +15,22 @@ if __name__ == '__main__':
     code = 'mono_test'
     # code = 'flow_test'
     if code == 'mono_test':
-        # monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/monoatomic_tokens.txt'
-        # fragment_counter_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/fragment_counter.pkl'
-        # save_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1k/vocab.pkl'
-        monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/monoatomic_tokens.txt'
-        fragment_counter_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/fragment_counter.pkl'
-        save_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/vocab.pkl'
+        monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/test_10k/preprocess/monoatomic_tokens.txt'
+        smiles_counter_file = '/workspaces/Ms2z/mnt/data/graph/test_10k/preprocess/smiles_counter.tsv'
+        joint_counter_file = '/workspaces/Ms2z/mnt/data/graph/test_10k/preprocess/joint_counter.tsv'
+        vocab_file = '/workspaces/Ms2z/mnt/data/graph/test_10k/vocab.pkl'
+        # monoatomic_tokens_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/monoatomic_tokens.txt'
+        # fragment_counter_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/fragment_counter.pkl'
+        # vocab_file = '/workspaces/Ms2z/mnt/data/graph/pubchem_1M/vocab.pkl'
         
         threshold = 2
         max_seq_len = 100
+        overwrite = False
 
-        if os.path.exists(save_file):
-            vocab = Vocab.load(save_file)
+        if not overwrite and os.path.exists(vocab_file):
+            vocab = Vocab.load(vocab_file)
         else:
-            vocab = Vocab(monoatomic_tokens_file, fragment_counter_file, threshold=threshold, save_path=save_file)
+            vocab = Vocab(monoatomic_tokens_file, smiles_counter_file, joint_counter_file, threshold=threshold, save_path=vocab_file)
 
         smiles_list = [
             'COc1ccc(C)cc1S(=O)(=O)C(C)C',

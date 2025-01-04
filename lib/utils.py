@@ -1,7 +1,10 @@
 from rdkit import Chem
+from rdkit.Chem import rdFMCS
+import numpy as np
 import dill
 from bidict import bidict
 import copy
+from collections import Counter, defaultdict
 
 
 bond_priority = bidict({'-': 0, '=': 1, '#': 2, ':': 3})
@@ -126,6 +129,45 @@ def token_to_num_bond(token, aromatic_as_half=False):
     else:
         raise ValueError("Invalid bond token.")  # Raise error for invalid tokens
     return bond_type
+
+def num_bond_to_token(num, aromatic_as_half=False):
+    """
+    Converts a numerical representation of a bond to a token.
+
+    Parameters:
+        num (int or float): Numerical representation of a bond.
+        aromatic_as_half (bool): If True, represents aromatic bonds (2.5) as ':',
+                                 and ensures all other bonds return as strings.
+
+    Returns:
+        str: Bond token ('-', '=', '#', ':').
+
+    Raises:
+        ValueError: If the provided numerical bond is invalid.
+    """
+    if aromatic_as_half:
+        if num == 1.0:
+            bond_token = "-"
+        elif num == 2.0:
+            bond_token = "="
+        elif num == 3.0:
+            bond_token = "#"
+        elif num == 2.5:
+            bond_token = ":"
+        else:
+            raise ValueError("Invalid numerical bond.")
+    else:
+        if num == 1:
+            bond_token = "-"
+        elif num == 2:
+            bond_token = "="
+        elif num == 3:
+            bond_token = "#"
+        elif num == 4:
+            bond_token = ":"
+        else:
+            raise ValueError("Invalid numerical bond.")
+    return bond_token
 
 def get_atom_symbol(atom):
     """
@@ -436,3 +478,165 @@ def remove_Hs(rwmol, a1, a2, bond_type):
     rwmol = Chem.RemoveHs(rwmol)
     rwmol = Chem.RWMol(rwmol)
     return rwmol
+
+
+def frag_to_joint_list(frag_tuple):
+    atom_idx_to_bond_counter = defaultdict(lambda: [0, 0, 0])
+    for atom_idx, bond_token in zip(frag_tuple[1::2], frag_tuple[2::2]):
+        atom_idx_to_bond_counter[atom_idx][token_to_num_bond(bond_token)-1] += 1
+    joint_list = [(atom_idx, bond_counter[0], bond_counter[1], bond_counter[2]) for atom_idx, bond_counter in atom_idx_to_bond_counter.items()]
+    return joint_list
+
+
+def count_atoms_in_molecule(mol, ignore_hydrogen=True):
+    """
+    Count the number of each type of atom in a molecule, optionally ignoring hydrogen atoms.
+
+    Args:
+        mol (rdkit.Chem.Mol): Input molecule.
+        ignore_hydrogen (bool, optional): If True, hydrogen atoms (H) will be ignored. Defaults to True.
+
+    Returns:
+        Counter: A Counter object with atom symbols as keys and their counts as values.
+    """
+    # Get a list of atom symbols
+    atom_symbols = [atom.GetSymbol() for atom in mol.GetAtoms()]
+    
+    # Optionally filter out hydrogen atoms
+    if ignore_hydrogen:
+        atom_symbols = [symbol for symbol in atom_symbols if symbol != "H"]
+    
+    # Return a Counter object of atom counts
+    return Counter(atom_symbols)
+
+def count_bonds_in_molecule(mol):
+    """
+    Count the number of each type of bond in a molecule.
+
+    Args:
+        mol (rdkit.Chem.Mol): Input molecule.
+
+    Returns:
+        Counter: A Counter object with bond types as keys and their counts as values.
+    """
+    # Get a list of bond types
+    bond_types = [chem_bond_to_token(bond.GetBondType()) for bond in mol.GetBonds()]
+    
+    # Return a Counter object of bond counts
+    return Counter(bond_types)
+
+def softmax(x):
+    """
+    Compute softmax values for a list or array.
+    """
+    exp_x = np.exp(np.max(x) - x)  # Numerical stability adjustment
+    return exp_x / exp_x.sum()
+
+def compute_weights_with_softmax(raw_weights):
+    """
+    Adjust raw weights using softmax to emphasize rare atoms.
+
+    Args:
+        raw_weights (dict): Raw weights for atoms.
+
+    Returns:
+        dict: Adjusted weights after applying softmax.
+    """
+    symbols = list(raw_weights.keys())
+    raw_values = np.array(list(raw_weights.values()))
+    adjusted_values = softmax(-raw_values)  # Invert values to prioritize low-frequency atoms
+    return dict(zip(symbols, adjusted_values))
+
+def mask_atoms_with_custom_symbol(mol, match_indices, symbol):
+    """
+    Masks specified atoms in a molecule by replacing them with a custom atomic symbol.
+    """
+    editable_mol = Chem.EditableMol(mol)
+    for idx in sorted(match_indices, reverse=True):  # Process indices in reverse order
+        new_atom = Chem.Atom(symbol)
+        editable_mol.ReplaceAtom(idx, new_atom)
+    return editable_mol.GetMol()
+
+def find_mcs_and_mask_custom(mol1, mol2, weights=None, iterations=2):
+    """
+    Iteratively finds the Maximum Common Substructure (MCS) between two molecules
+    and masks the matched atoms with custom symbols for further analysis.
+
+    Args:
+        mol1 (rdkit.Chem.Mol): First molecule.
+        mol2 (rdkit.Chem.Mol): Second molecule.
+        weights (dict or None): Dictionary of atom weights. If None, all weights are treated as 1.0.
+        iterations (int): Maximum number of iterations for finding MCS.
+
+    Returns:
+        float: Weighted total number of atoms in the common substructures across all iterations.
+    """
+    total_common_weighted_atoms = 0.0
+    masked_mol1 = mol1
+    masked_mol2 = mol2
+
+    for _ in range(iterations):
+        # Find the Maximum Common Substructure (MCS)
+        mcs = rdFMCS.FindMCS([masked_mol1, masked_mol2])
+        if mcs.numAtoms == 0:
+            break  # Stop if no common structure is found
+
+        # Get the MCS molecule and atom matches
+        mcs_mol = Chem.MolFromSmarts(mcs.smartsString)
+        match1 = masked_mol1.GetSubstructMatch(mcs_mol)
+        match2 = masked_mol2.GetSubstructMatch(mcs_mol)
+
+        if not match1 or not match2:
+            break
+
+        # Calculate weighted common atoms for the current MCS
+        for atom_idx in match1:  # Iterate over matched atoms in mol1
+            atom_symbol = masked_mol1.GetAtomWithIdx(atom_idx).GetSymbol()
+            weight = weights.get(atom_symbol, 1.0) if weights else 1.0
+            total_common_weighted_atoms += 1.0 / weight
+
+        # Mask matched atoms in each molecule with custom symbols
+        masked_mol1 = mask_atoms_with_custom_symbol(masked_mol1, match1, "Nh")
+        masked_mol2 = mask_atoms_with_custom_symbol(masked_mol2, match2, "Og")
+
+    return total_common_weighted_atoms
+
+def calculate_mcs_similarity(mol1, mol2, weights=None):
+    """
+    Calculate similarity between two molecules using MCS and weighted atom counts.
+
+    Args:
+        mol1 (rdkit.Chem.Mol): First molecule.
+        mol2 (rdkit.Chem.Mol): Second molecule.
+        weights (dict or None): Dictionary of atom weights. If None, all weights are treated as 1.0.
+                                Example:
+                                    raw_weights = {"C": 0.9, "Br": 0.0003}
+                                    weights = compute_weights_with_softmax(raw_weights)
+                                    Resulting weights:
+                                    {
+                                        "C": 0.28911215136850005,  # Lower weight for common atoms
+                                        "Br": 0.7108878486314999   # Higher weight for rare atoms
+                                    }
+
+    Returns:
+        float: Adjusted similarity score.
+    """
+    # Get the total weighted number of atoms in each molecule
+    weighted_total_atoms_mol1 = sum(
+        1.0 / weights.get(atom.GetSymbol(), 1.0) if weights else 1.0
+        for atom in mol1.GetAtoms()
+    )
+    weighted_total_atoms_mol2 = sum(
+        1.0 / weights.get(atom.GetSymbol(), 1.0) if weights else 1.0
+        for atom in mol2.GetAtoms()
+    )
+
+    # Find the total weighted number of common atoms using the iterative MCS function
+    weighted_common_atoms = find_mcs_and_mask_custom(mol1, mol2, weights, iterations=10)
+
+    # Calculate the total weighted number of atoms in the union of both molecules
+    weighted_union_atoms = weighted_total_atoms_mol1 + weighted_total_atoms_mol2 - weighted_common_atoms
+
+    # Calculate similarity as the ratio of weighted common atoms to weighted union atoms
+    similarity = weighted_common_atoms / weighted_union_atoms
+    return similarity

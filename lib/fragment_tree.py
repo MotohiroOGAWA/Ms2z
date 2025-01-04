@@ -35,7 +35,7 @@ class FragmentNode:
         :param value: The value to store at the leaf node.
         """
         key = keys[self.depth]
-        score = self.score + sum(1 for c in key if c.isdigit())
+        score = self.score + sum(1 for c in key.split(',') if c not in ['-', '=', '#', ':'])
         if len(keys) == self.depth + 1:
             score += sum(1 for c in key if c in ['-', '=', '#', ':'])
         if key not in self.children:
@@ -168,6 +168,7 @@ class FragmentTree:
     """
     def __init__(self):
         self.root = FragmentNode(depth=0, score=0)
+        self.smiles_and_atom_idx_to_potential = {}
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -209,7 +210,8 @@ class FragmentTree:
             # mol = Chem.MolFromSmiles(smiles)
 
             results = []
-            if current_bond_pos == -1:
+            # if current_bond_pos == -1:
+            if False:
                 bond_tokens = []
                 start_atom = current_frag.mol.GetAtomWithIdx(start_atom_idx)
                 symbol = get_atom_symbol(start_atom)
@@ -222,7 +224,7 @@ class FragmentTree:
                     if start_atom_idx == current_frag_bond.atom_idx:
                         bond_tokens.append(current_frag_bond.token)
                 bond_tokens = sorted(bond_tokens, key=lambda x: bond_priority[x])
-                tree_keys = [bond_tokens[0], symbol]
+                tree_keys = [symbol]
                 if len(bond_tokens) > 1:
                     tree_keys.append(''.join(bond_tokens[1:]))
                 
@@ -236,7 +238,7 @@ class FragmentTree:
                         break
 
             else:
-                tree_keys = FragmentTree.get_tree_keys(copy.deepcopy(current_frag.mol), current_frag.bond_list, start_bond_pos=current_bond_pos)
+                tree_keys = FragmentTree.get_tree_keys(current_frag.mol, start_atom_idx=current_frag.atom_map.index(start_global_atom_idx))
                 current_node = self.root
                 for i, key in enumerate(tree_keys):
                     if key in current_node.children:
@@ -247,46 +249,91 @@ class FragmentTree:
                         break
             if len(results) == 0:
                 raise ValueError(f'Not Found Atom Token: {current_frag.smiles}')
-            results = sorted(results, key=lambda x: x[1], reverse=True)
+            results = sorted(results, key=lambda x: x[1], reverse=True) # [((smiles, start_atom_idx), score), ...]
 
             for result, _ in results:
                 qry_frag_smiles = result[0]
-                qry_frag_bond_list = FragBondList(result[1])
-                qry_start_pos = result[2]
-                qry_frag = Fragment(qry_frag_smiles, qry_frag_bond_list)
-                if current_bond_pos == -1:
+                qry_frag_bond_list = FragBondList()
+                qry_start_pos = result[1]
+                qry_mol = Chem.MolFromSmiles(qry_frag_smiles)
+                # qry_frag = Fragment(qry_frag_smiles, qry_frag_bond_list)
+                # if current_bond_pos == -1:
+                if False:
                     start_mol = Chem.MolFromSmiles(qry_frag_smiles)
                     qry_start_atom = start_mol.GetAtomWithIdx(0)
                     if get_atom_symbol(start_atom) != get_atom_symbol(qry_start_atom):
                         continue
                     if start_atom.GetNumExplicitHs() != qry_start_atom.GetNumExplicitHs():
                         continue
-                    matched_q_to_t_atom_map = {start_atom_idx: start_atom_idx}
+                    matched_q_to_t_global_atom_map = {start_atom_idx: start_atom_idx}
                 else:
-                    matches = current_frag.GetSubstructMatches(qry_frag)
+                    # matches = current_frag.GetSubstructMatches(qry_frag)
+                    matches = current_frag.mol.GetSubstructMatches(qry_mol)
                     if len(matches) == 0:
                         continue
-                    matched_q_to_t_atom_map = None
+                    
+                    start_atom_idx = current_frag.atom_map.index(start_global_atom_idx)
                     for match in matches:
-                        if current_frag.atom_map[current_frag.bond_list[current_bond_pos].atom_idx] in match:
-                            matched_q_to_t_atom_map = match
+                        if start_atom_idx in match:
                             break
-                if matched_q_to_t_atom_map is not None:
+                    else:
+                        continue
+                        # raise ValueError(f'Not Found Start Atom In Match: {current_frag}')
+                    
+                    match_with_global_atom_idx = [current_frag.atom_map[match_idx] for match_idx in match]
+                    bond_arr = defaultdict(lambda: [0,0,0])
+                    for atom in current_frag.mol_with_alt.GetAtoms():
+                        if current_frag.atom_map_with_alt[atom.GetIdx()] not in match_with_global_atom_idx:
+                            continue
+                        global_atom_idx = current_frag.atom_map_with_alt[atom.GetIdx()]
+                        bonds = atom.GetBonds()
+                        for bond in bonds:
+                            e_atom = bond.GetOtherAtom(atom)
+                            if current_frag.atom_map_with_alt[e_atom.GetIdx()] in match_with_global_atom_idx:
+                                continue
+                            bond_type = bond.GetBondType()
+                            bond_token = chem_bond_to_token(bond_type)
+                            bond_num = token_to_num_bond(bond_token)
+                            bond_arr[match_with_global_atom_idx.index(global_atom_idx)][bond_num-1] += 1
+
+                    # Check if the potential is upper than the bonds in the current fragment
+                    frag = True
+                    pre_bond_list = []
+                    for atom_idx, bond_info in bond_arr.items():
+                        required_potential = bond_info[0] + bond_info[1]*2 + bond_info[2]*3
+                        if required_potential > self.smiles_and_atom_idx_to_potential[qry_frag_smiles].get(atom_idx, -1):
+                            frag = False
+                            break
+                        if bond_info[0] > 0:
+                            pre_bond_list.extend([(atom_idx, '-')*bond_info[0]])
+                        if bond_info[1] > 0:
+                            pre_bond_list.extend([(atom_idx, '=')*bond_info[1]])
+                        if bond_info[2] > 0:
+                            pre_bond_list.extend([(atom_idx, '#')*bond_info[2]])
+                    if not frag:
+                        continue
+
+                    bond_list = FragBondList(pre_bond_list)
+                    qry_frag = Fragment(qry_frag_smiles, bond_list)
+
+                    matched_q_to_t_global_atom_map = [current_frag.atom_map[match_idx] for match_idx in match]
+
                     break
             else:
                 raise ValueError(f'Not Found Atom Token: {current_frag}')
             
             cut_remaining_atom_indices = set()
-            if current_bond_pos == -1:
+            # if current_bond_pos == -1:
+            if False:
                 cut_remaining_atom_indices.add(start_atom_idx)
                 visited.update([current_frag.atom_map[start_atom_idx]])
             else:
                 for qry_frag_bond in qry_frag.bond_list:
                     # if qry_start_pos == qry_frag_bond.id:
                     #     continue
-                    cut_remaining_atom_indices.add(current_frag.atom_map.index(matched_q_to_t_atom_map[qry_frag_bond.atom_idx]))
+                    cut_remaining_atom_indices.add(current_frag.atom_map.index(matched_q_to_t_global_atom_map[qry_frag_bond.atom_idx]))
                 cut_remaining_atom_indices = sorted(list(cut_remaining_atom_indices))
-                visited.update([v for v in matched_q_to_t_atom_map])
+                visited.update([v for v in matched_q_to_t_global_atom_map])
 
             cut_atom_pairs = []
             for cut_atom_idx in cut_remaining_atom_indices:
@@ -343,24 +390,28 @@ class FragmentTree:
             raise ValueError(f'Cannot Build Fragment Tree: {ori_fragment}')
         return tuple(root_next), vocab_list, global_atom_map
     
-    def add_fragment(self, fragment: Fragment):
-        for frag_bond in fragment.bond_list:
-            tree_keys = FragmentTree.get_tree_keys(fragment.mol, fragment.bond_list, start_bond_pos=frag_bond.id)
-            self.root.add_child(tree_keys, (fragment.smiles, fragment.bond_list.tolist(), frag_bond.id))
+    def add_fragment(self, smi, atom_idx_to_potential):
+        mol = Chem.MolFromSmiles(smi)
+        ring_info = mol.GetRingInfo()
+        if ring_info.NumRings() > 0:
+            return
+        self.smiles_and_atom_idx_to_potential[smi] = dict(atom_idx_to_potential)
+        for atom_idx, potential in atom_idx_to_potential.items():
+            tree_keys = FragmentTree.get_tree_keys(mol, start_atom_idx=atom_idx)
+            self.root.add_child(tree_keys, (smi, atom_idx))
 
     @staticmethod
-    def get_tree_keys(fragment_mol, frag_bond_list: FragBondList, start_bond_pos):
+    def get_tree_keys(fragment_mol, start_atom_idx):
         fragment_mol = copy.deepcopy(fragment_mol)
-        frag_bond_list = copy.deepcopy(frag_bond_list)
-        traversal_order = [[frag_bond_list[start_bond_pos].token]]
+        traversal_order = []
         visited = set()
-        FragmentTree.dfs(fragment_mol, visited, traversal_order, prev_atom_indices=[frag_bond_list[start_bond_pos].atom_idx], frag_bond_list=FragBondList([frag_bond for frag_bond in frag_bond_list if frag_bond.id != start_bond_pos]))
+        FragmentTree.dfs(fragment_mol, visited, traversal_order, prev_atom_indices=[start_atom_idx])
         traversal_order = [sorted(v, key=lambda x: bond_priority.get(x, x)) for v in traversal_order]
         tree_keys = [','.join(map(str, v)) for v in traversal_order]
         return tree_keys
 
     @staticmethod
-    def dfs(mol, visited, traversal_order, prev_atom_indices, frag_bond_list):
+    def dfs(mol, visited, traversal_order, prev_atom_indices):
         next_atom_indices = []
         current_symbols = []
         current_bonds = []
@@ -371,9 +422,6 @@ class FragmentTree:
             atom = mol.GetAtomWithIdx(atom_index)
             visited.add(atom_index)
             current_symbols.append(get_atom_symbol(atom))
-            for frag_bond in frag_bond_list:
-                if frag_bond.atom_idx == atom_index:
-                    current_bonds.append(frag_bond.token)
 
             for neighbor in atom.GetNeighbors():
                 neighbor_index = neighbor.GetIdx()
@@ -393,14 +441,14 @@ class FragmentTree:
         if len(next_atom_indices) == 0:
             return traversal_order
         else:
-            FragmentTree.dfs(mol, visited, traversal_order, next_atom_indices, frag_bond_list)
+            FragmentTree.dfs(mol, visited, traversal_order, next_atom_indices)
 
     # Example function to build the tree from a list of fragments
-    def add_fragment_list(self, fragment_list: list[Fragment]):
+    def add_fragment_list(self, potentials:dict[str,dict[int,int]]):
         # Root node for the tree
         # root = FragmentNode('', 'Root')
-        for fragment in tqdm(fragment_list, mininterval=0.5, desc='Building Fragment Tree'):
-            self.add_fragment(fragment)
+        for smi, atom_idx_to_potential in tqdm(potentials.items(), mininterval=0.5, desc='Building Fragment Tree'):
+            self.add_fragment(smi, atom_idx_to_potential)
 
     def save_tree(self, file_path):
         """
@@ -452,81 +500,81 @@ class FragmentTree:
         with open(file_path, "w") as file:
             self.root._write_to_file(file)
 
-def build_route_tree(frag_info, start_bond_pos, mol=None, options=None):
-    if mol is None:
-        mol = Chem.MolFromSmiles(frag_info[0])
+# def build_route_tree(frag_info, start_bond_pos, mol=None, options=None):
+#     if mol is None:
+#         mol = Chem.MolFromSmiles(frag_info[0])
     
-    if options is not None and 'max_route' in options:
-        max_route = options['max_route']
-    else:
-        max_route = float('inf')
+#     if options is not None and 'max_route' in options:
+#         max_route = options['max_route']
+#     else:
+#         max_route = float('inf')
         
-    bond_infoes = [(bond_idx, bond_type) for bond_idx, bond_type in zip(frag_info[1::2], frag_info[2::2])]
-    frag_info_dict = defaultdict(list)
-    for i in range(len(bond_infoes)):
-        frag_info_dict[bond_infoes[i][0]].append(i)
+#     bond_infoes = [(bond_idx, bond_type) for bond_idx, bond_type in zip(frag_info[1::2], frag_info[2::2])]
+#     frag_info_dict = defaultdict(list)
+#     for i in range(len(bond_infoes)):
+#         frag_info_dict[bond_infoes[i][0]].append(i)
     
-    visited = set()
-    completed_routes = []
-    start_atom_idx = bond_infoes[start_bond_pos][0]
-    start_atom = mol.GetAtomWithIdx(start_atom_idx)
-    current_routes = [{'idx': [start_atom_idx], 'route': []}]
-    current_routes[0]['route'].append(bond_infoes[start_bond_pos][1])
-    current_routes[0]['route'].append(get_atom_symbol(start_atom))
-    visited.add(bond_infoes[start_bond_pos][0])
-    for i, bond_info in enumerate(bond_infoes):
-        if i == start_bond_pos:
-            continue
-        if bond_info[0] == start_atom_idx:
-            route = copy.deepcopy(current_routes[0])
-            route['route'].append(bond_info[1])
-            completed_routes.append(route)
+#     visited = set()
+#     completed_routes = []
+#     start_atom_idx = bond_infoes[start_bond_pos][0]
+#     start_atom = mol.GetAtomWithIdx(start_atom_idx)
+#     current_routes = [{'idx': [start_atom_idx], 'route': []}]
+#     current_routes[0]['route'].append(bond_infoes[start_bond_pos][1])
+#     current_routes[0]['route'].append(get_atom_symbol(start_atom))
+#     visited.add(bond_infoes[start_bond_pos][0])
+#     for i, bond_info in enumerate(bond_infoes):
+#         if i == start_bond_pos:
+#             continue
+#         if bond_info[0] == start_atom_idx:
+#             route = copy.deepcopy(current_routes[0])
+#             route['route'].append(bond_info[1])
+#             completed_routes.append(route)
 
-    if len(visited) == mol.GetNumAtoms():
-        if len(completed_routes) == 0: # -O などの1つの原子で続きの結合がない場合 
-            completed_routes.append(current_routes[0])
-        next_routes = []
-        current_routes = []
+#     if len(visited) == mol.GetNumAtoms():
+#         if len(completed_routes) == 0: # -O などの1つの原子で続きの結合がない場合 
+#             completed_routes.append(current_routes[0])
+#         next_routes = []
+#         current_routes = []
     
-    route_cnt = 1
-    while len(current_routes) > 0:
-        next_routes = []
-        for i, current_route in enumerate(reversed(current_routes)):
-            current_atom = mol.GetAtomWithIdx(current_route['idx'][-1])
-            neighbors = [neighbor for neighbor in current_atom.GetNeighbors() if neighbor.GetIdx() not in visited]
+#     route_cnt = 1
+#     while len(current_routes) > 0:
+#         next_routes = []
+#         for i, current_route in enumerate(reversed(current_routes)):
+#             current_atom = mol.GetAtomWithIdx(current_route['idx'][-1])
+#             neighbors = [neighbor for neighbor in current_atom.GetNeighbors() if neighbor.GetIdx() not in visited]
 
-            if len(neighbors) == 0:
-                if len(current_route['route']) % 2 == 0: # -C-C などの続きの結合がない場合
-                    completed_routes.append(current_route)
-                continue
+#             if len(neighbors) == 0:
+#                 if len(current_route['route']) % 2 == 0: # -C-C などの続きの結合がない場合
+#                     completed_routes.append(current_route)
+#                 continue
 
-            for neighbor in neighbors:
-                neighbor_idx = neighbor.GetIdx()
-                visited.add(neighbor_idx)
-                new_route = copy.deepcopy(current_route)
-                bond = mol.GetBondBetweenAtoms(current_route['idx'][-1], neighbor_idx)
-                bond_type = chem_bond_to_token(bond.GetBondType())
-                new_route['route'].append(bond_type)
-                if route_cnt < max_route:
-                    new_route['idx'].append(neighbor_idx)
-                    new_route['route'].append(get_atom_symbol(neighbor))
+#             for neighbor in neighbors:
+#                 neighbor_idx = neighbor.GetIdx()
+#                 visited.add(neighbor_idx)
+#                 new_route = copy.deepcopy(current_route)
+#                 bond = mol.GetBondBetweenAtoms(current_route['idx'][-1], neighbor_idx)
+#                 bond_type = chem_bond_to_token(bond.GetBondType())
+#                 new_route['route'].append(bond_type)
+#                 if route_cnt < max_route:
+#                     new_route['idx'].append(neighbor_idx)
+#                     new_route['route'].append(get_atom_symbol(neighbor))
                 
-                    for i, bond_info in enumerate(bond_infoes):
-                        if neighbor_idx != bond_info[0]:
-                            continue
-                        route = new_route.copy()
-                        route['route'].append(bond_info[1])
-                        completed_routes.append(route)
+#                     for i, bond_info in enumerate(bond_infoes):
+#                         if neighbor_idx != bond_info[0]:
+#                             continue
+#                         route = new_route.copy()
+#                         route['route'].append(bond_info[1])
+#                         completed_routes.append(route)
                 
-                next_routes.append(new_route)
+#                 next_routes.append(new_route)
 
-        current_routes = next_routes
-        route_cnt += 1
-        if route_cnt > max_route:
-            break
+#         current_routes = next_routes
+#         route_cnt += 1
+#         if route_cnt > max_route:
+#             break
 
     
-    for current_route in current_routes:
-        completed_routes.append(current_route)
+#     for current_route in current_routes:
+#         completed_routes.append(current_route)
     
-    return completed_routes
+#     return completed_routes

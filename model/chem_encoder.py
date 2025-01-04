@@ -30,10 +30,14 @@ class ChildSumTreeLSTMCell(nn.Module):
         self.W_o = nn.Linear(node_dim + h_size, h_size)
         self.b_o = nn.Parameter(torch.zeros(h_size))
 
+        # Attention mechanism
+        self.attention = nn.Linear(h_size+node_dim, 1)
+
         self.edge_linear1 = nn.Linear(h_size+node_dim+edge_dim, h_size+node_dim)
         self.edge_linear2 = nn.Linear(h_size+node_dim, h_size+node_dim)
 
-        self.node_linear = nn.Linear(node_dim+h_size, node_dim+h_size)
+        self.node_linear1 = nn.Linear(node_dim+h_size, node_dim+h_size)
+        self.node_linear2 = nn.Linear(node_dim+h_size, node_dim+h_size)
 
     def message_func(self, src, dst):
         """
@@ -62,10 +66,18 @@ class ChildSumTreeLSTMCell(nn.Module):
         h2 = torch.relu(h2)
         h2 = self.edge_linear2(h2)
 
-        masked_h2 = self.node_linear(h2) * mask['h'].unsqueeze(-1)
+        # Attention weights
+        attention_scores = self.attention(h2)  # Shape: (batch_size, num_children, 1)
+        attention_scores = attention_scores.masked_fill(mask['h'].unsqueeze(-1) == False, float('-inf'))
+        attention_weights = torch.softmax(attention_scores, dim=1)
+
+        masked_h2 = self.node_linear1(h2) * mask['h'].unsqueeze(-1)
+        weighted_h2 = attention_weights * masked_h2
 
         # Sum hidden states from children
-        h_sum = torch.sum(masked_h2, dim=1)  # Sum over all children
+        h_sum = torch.sum(weighted_h2, dim=1)  # Sum over all children
+
+        h_sum = self.node_linear2(h_sum)
         
         # Forget gate for each child node
         f = torch.sigmoid(self.W_f(h_sum) + self.b_f)  # Shape: (batch_size, h_size)
@@ -135,10 +147,20 @@ class StructureEncoder(nn.Module):
 
         # Linear transformations
         self.dropout = nn.Dropout(dropout_rate)
-        self.linear = nn.Linear(h_size, h_size)
-        self.linear2 = nn.Linear(h_size, h_size)
-        self.linear3 = nn.Linear(h_size, h_size)
-        self.linear4 = nn.Linear(h_size, h_size)
+        # self.linear = nn.Linear(h_size, h_size)
+        # self.linear2 = nn.Linear(h_size, h_size)
+        # self.linear3 = nn.Linear(h_size, h_size)
+        # self.linear4 = nn.Linear(h_size, h_size)
+
+        self.linear = nn.Sequential(
+            nn.Linear(h_size, h_size),
+            nn.ReLU(),
+            nn.Linear(h_size, h_size),
+            nn.ReLU(),
+            nn.Linear(h_size, h_size),
+            nn.ReLU(),
+            nn.Linear(h_size, h_size),
+        )
 
     def forward(self, node_tensor, edge_attr, adj_matrix_list, mask_tensor):
         """
@@ -166,9 +188,10 @@ class StructureEncoder(nn.Module):
 
         # Apply dropout and linear transformations
         h = self.dropout(h_root)
-        y = torch.tanh(self.linear(h))
-        y2 = self.linear3(torch.relu(self.linear2(h)))
-        y = torch.relu(self.linear4(y + y2))
+        y = self.linear(h)
+        # y = torch.tanh(self.linear(h))
+        # y2 = self.linear3(torch.relu(self.linear2(h)))
+        # y = torch.relu(self.linear4(y + y2))
 
         return y
             

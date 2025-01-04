@@ -20,58 +20,64 @@ class Vocab:
     
     TOKENS = [BOS, EOS, PAD, UNK]
 
-    def __init__(self, monoatomic_tokens_path, fragment_counter_path, threshold, save_path=None):
+    def __init__(self, monoatomic_tokens_path, smiles_counter_path, joint_counter_path, threshold, save_path=None):
         self.threshold = threshold
-        self.idx_to_frag = {}
-        if monoatomic_tokens_path is not None and fragment_counter_path is not None:
+        if monoatomic_tokens_path is not None and joint_counter_path is not None:
             # load monoatomic tokens and fragment counter
             print(f"Loading fragment library", end='...')
+            mono_bond_potential = defaultdict(int)
             with open(monoatomic_tokens_path, 'r') as f:
-                monoatomic_fragments = [Fragment.parse_fragment_string(line.strip()) for line in f]
-            if fragment_counter_path.endswith('.pkl'):
-                fragment_counter = dill.load(open(fragment_counter_path, 'rb'))
+                for line in f:
+                    frag = Fragment.parse_fragment_string(line.strip())
+                    joint = frag_to_joint_list(tuple(frag))
+                    if len(joint) > 0:
+                        joint = joint[0]
+                        potential = joint[1] + joint[2] * 2 + joint[3] * 3
+                        mono_bond_potential[frag.smiles] = potential
+                    else:
+                        mono_bond_potential[frag.smiles] = 0
+            mono_bond_potential = dict(mono_bond_potential)
+
+            if smiles_counter_path.endswith('.pkl'):
+                smiles_counter = dill.load(open(smiles_counter_path, 'rb'))
+                smiles_list = [smiles for smiles, cnt in smiles_counter.items() if cnt >= threshold]
             else:
-                with open(fragment_counter_path, 'r') as f:
-                    fragment_counter = dict([(eval(line.strip().split('\t')[0]), int(line.strip().split('\t')[1]))
-                            for line in f])
-                    fragment_counter = Counter(fragment_counter)
+                with open(smiles_counter_path, 'r') as f:
+                    smiles_list = [line.strip().split('\t')[0] for line in f if int(line.strip().split('\t')[1]) >= threshold]
+            
+            if joint_counter_path.endswith('.pkl'):
+                joint_counter = dill.load(open(joint_counter_path, 'rb'))
+            else:
+                with open(joint_counter_path, 'r') as f:
+                    joint_counter = {line.split('\t')[0]: {eval(joint):cnt for joint, cnt in zip(line.split('\t')[1::2], line.split('\t')[2::2])} for line in f}
+            
+            bond_poteintials = defaultdict(lambda: defaultdict(int))
+            for smi, potential in mono_bond_potential.items():
+                bond_poteintials[smi][0] = potential
+            for smi in smiles_list:
+                for joint, cnt in joint_counter[smi].items():
+                    p = joint[1] + joint[2] * 2 + joint[3] * 3
+                    if p > bond_poteintials[smi][joint[0]]:
+                        bond_poteintials[smi][joint[0]] = p
             print("done")
 
             # get the vocab
-            max_bond_cnt = 0
-            self.symbol_to_idx = {symbol:i for i, symbol in enumerate(list(set(frag.mol.GetAtoms()[0].GetSymbol() for frag in monoatomic_fragments)))}
-            vocab_dict = {tuple(frag): frag for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
-            vocab_tuple_to_graph = {tuple(frag): tuple(self.get_graph(frag)) for frag in monoatomic_fragments if ':' not in frag.bond_list.tokens}
-            for frag_strings, cnt in tqdm(fragment_counter.items(), desc='Building Vocabulary', mininterval=0.5):
-                try:
-                    if cnt >= threshold:
-                        fragment = Fragment.parse_fragment_string(frag_strings)
-                        if fragment.mol is not None:
-                            node_tensor, edge_tensor, frag_bond_tensor = self.get_graph(fragment)
-                            bond_cnt = len(fragment.bond_list)
-
-                            vocab_tuple_to_graph[tuple(fragment)] = (node_tensor, edge_tensor, frag_bond_tensor)
-                            vocab_dict[tuple(fragment)] = fragment
-                            max_bond_cnt = max(max_bond_cnt, bond_cnt)
-                except Exception as e:
-                    print(f"Error: {e}: {frag_strings}")            
-            
-            self.vocab = bidict({v:i for i, v in enumerate(Vocab.TOKENS)})
-            self.vocab.update({v:i+len(Vocab.TOKENS) for i, v in enumerate(vocab_dict.keys())})
+            max_joint_cnt = max([len(v) for v in bond_poteintials.values()])
+            self.idx_to_token = bidict({i:v for i, v in enumerate(Vocab.TOKENS)})
+            self.idx_to_token.update({i+len(Vocab.TOKENS):smi for i, smi in enumerate(bond_poteintials.keys())})           
             self._set_token_idx()
 
-            # bond pos tensor
-            bond_pos_tensor = torch.full((len(self.vocab)+1, max_bond_cnt), -1.0, dtype=torch.float32)
-            for v, idx in tqdm(self.vocab.items(), desc='BondPosFromVocab', mininterval=0.5):
-                if v in Vocab.TOKENS:
+            joint_potential_tensor = torch.full((len(self), max_joint_cnt, 2), -1, dtype=torch.int32) # (vocab_size, max_joint_cnt, 2(atom_idx, potential))
+            for idx, token in tqdm(self.idx_to_token.items(), desc='JointFromVocab'):
+                if token in Vocab.TOKENS:
                     continue
-                bond_cnt = (len(v)-1)//2
-                bond_pos_tensor[idx, :bond_cnt] = torch.zeros(bond_cnt, dtype=torch.float32)
-            self.bond_pos_tensor = bond_pos_tensor
+                for i, (atom_idx, potential) in enumerate(bond_poteintials[token].items()):
+                    joint_potential_tensor[idx, i] = torch.tensor([atom_idx, potential], dtype=torch.int32)
+            self.joint_potential_tensor = joint_potential_tensor
 
             # build fragment tree
             self.tree = FragmentTree()
-            self.tree.add_fragment_list(vocab_dict.values())
+            self.tree.add_fragment_list(bond_poteintials)
         
         self.fragmentizer = Fragmentizer()
 
@@ -79,32 +85,31 @@ class Vocab:
             print(f"Saving vocabulary to {save_path}", end='...')
             self.save(save_path)
             print("done")
-            print(f"Vocabulary size (>={self.threshold}): {len(self.vocab)}")
+            print(f"Vocabulary size (>={self.threshold}): {len(self)}")
 
     def __len__(self):
-        return len(self.vocab)
+        return len(self.idx_to_token)
     
     def __getitem__(self, key):
         if isinstance(key, int):
-            return self.vocab.inv[key]
-        elif isinstance(key, tuple):
-            return self.vocab[key]
+            return self.idx_to_token[key]
+        elif isinstance(key, str):
+            return self.idx_to_token.inv[key]
     
     def _set_token_idx(self):
-        self.bos = self.vocab[self.BOS]
-        self.eos = self.vocab[self.EOS]
-        self.pad = self.vocab[self.PAD]
-        self.unk = self.vocab[self.UNK]
+        self.bos = self[self.BOS]
+        self.eos = self[self.EOS]
+        self.pad = self[self.PAD]
+        self.unk = self[self.UNK]
 
     def get_data_to_save(self):
         data_to_save = {
-            'vocab': self.vocab,
-            'symbol': self.symbol_to_idx,
-            'bond_pos': self.bond_pos_tensor,
-            # 'graph': self.vocab_idx_to_graph,
-            # 'tgt_tensors': (self.atom_counter_tensors, self.inner_bond_counter_tensors, self.outer_bond_cnt_tensors),
+            'token': self.idx_to_token,
+            'joint_potential': self.joint_potential_tensor,
             'tree': self.tree.root.to_list(),
+            'tree_smi_potential': self.tree.smiles_and_atom_idx_to_potential,
             'threshold': self.threshold,
+
         }
         return data_to_save
 
@@ -114,23 +119,19 @@ class Vocab:
         dill.dump(data_to_save, open(path, 'wb'))
 
 
-
     @staticmethod
     def get_vocab_from_data(data):
-        vocab_data = data['vocab']
-        symbol_data = data['symbol']
-        bond_pos_data = data['bond_pos']
-        # vocab_idx_to_graph_data = data['graph']
+        token_data = data['token']
+        joint_potential_data = data['joint_potential']
         tree_data = data['tree']
+        tree_smi_potential_data = data['tree_smi_potential']
         threshold = data['threshold']
-        vocab = Vocab(None, None, threshold)
-        vocab.vocab = vocab_data
+        vocab = Vocab(None, None, None, threshold)
+        vocab.idx_to_token = token_data
         vocab._set_token_idx()
-        vocab.symbol_to_idx = symbol_data
-        vocab.bond_pos_tensor = bond_pos_data
-        # vocab.vocab_idx_to_graph = vocab_idx_to_graph_data
-        # vocab.atom_counter_tensors, vocab.inner_bond_counter_tensors, vocab.outer_bond_cnt_tensors = data['tgt_tensors']
+        vocab.joint_potential_tensor = joint_potential_data
         vocab.tree = FragmentTree.from_list(tree_data)
+        vocab.tree.smiles_and_atom_idx_to_potential = tree_smi_potential_data
         return vocab
 
     @staticmethod
@@ -142,7 +143,7 @@ class Vocab:
             print("done")
         vocab = Vocab.get_vocab_from_data(data)
         if message:
-            print(f"Vocabulary size (>={vocab.threshold}): {len(vocab.vocab)}")
+            print(f"Vocabulary size (>={vocab.threshold}): {len(vocab)}")
         return vocab
 
     def assign_vocab(self, mol):
@@ -150,10 +151,11 @@ class Vocab:
 
         frag_to_idx = {}
         for i, fragment in enumerate(fragment_group):
+
             if tuple(fragment) in frag_to_idx:
                 continue
-            idx = self.vocab.get(tuple(fragment), -1)
-            if idx == -1:
+            token_idx = self.idx_to_token.inv.get(fragment.smiles, -1)
+            if token_idx == -1:
                 ring_info = fragment.mol.GetRingInfo()
                 # Nonvalid fragment if it contains a ring
                 try:
@@ -165,8 +167,9 @@ class Vocab:
                     num_rings = ring_info.NumRings()
                 if num_rings > 0:
                     raise ValueError("Error: Ring not in vocabulary.")
+            frag_to_idx[fragment.smiles] = token_idx
 
-            frag_to_idx[tuple(fragment)] = idx
+
         
         # atom_scores = calculate_advanced_scores(mol)
         # max_atom_score_tuple = max(atom_scores, key=lambda x: x[2])
@@ -185,7 +188,7 @@ class Vocab:
             fragment: Fragment = fragment_group[frag_idx]
             atom_mapping = fragment.atom_map
 
-            vocab_idx = frag_to_idx[tuple(fragment)]
+            vocab_idx = frag_to_idx[fragment.smiles]
             if vocab_idx == -1:
                 current_frag_idx += 1
                 order_frag_idx = current_frag_idx
@@ -202,9 +205,9 @@ class Vocab:
                 merge_bond_poses = []
                 for sub_vocab_idx, sub_vocab in enumerate(sub_vocab_list):
                     tmp_frag = sub_vocab['frag']
-                    if tuple(tmp_frag) not in frag_to_idx:
-                        frag_to_idx[tuple(tmp_frag)] = self.vocab.get(tuple(tmp_frag), -1)
-                    sub_vocab['idx'] = frag_to_idx[tuple(tmp_frag)]
+                    if tmp_frag.smiles not in frag_to_idx:
+                        frag_to_idx[tmp_frag.smiles] = self[tmp_frag.smiles]
+                    sub_vocab['idx'] = frag_to_idx[tmp_frag.smiles]
 
                     for i, next_v in enumerate(sub_vocab['next']):
                         sub_vocab['next'][i] = (next_v[0], next_v[1], (next_v[2][0] + current_frag_idx, next_v[2][1]))
@@ -212,7 +215,8 @@ class Vocab:
                     for frag_bond in tmp_frag.bond_list:
                         merge_bond_poses.append((sub_vocab_idx, frag_bond.id))
 
-                    vocab_list.append(sub_vocab)
+                    # vocab_list.append(sub_vocab)
+                    vocab_list.append({'frag': tuple(sub_vocab['frag']), 'idx': sub_vocab['idx'], 'next': sub_vocab['next']})
                 if root_next[2][1] != -1:
                     merge_bond_poses.remove((root_next[2][0], root_next[2][1]))
                 for sub_vocab_idx, sub_vocab in enumerate(sub_vocab_list):
@@ -275,27 +279,31 @@ class Vocab:
         if vocab_tree is None:
             return None
         
-        vocab_tensor = torch.zeros(max_seq_len, dtype=torch.int64)
-        order_tensor = torch.zeros(max_seq_len, 6, dtype=torch.int64) # (parent_idx, parent_bond_pos, bond_pos)
+        vocab_tensor = torch.full((max_seq_len,), -1, dtype=torch.int64)
+        order_tensor = torch.full((max_seq_len, 4), -1, dtype=torch.int32) # (parent_idx, parent_atom_pos, atom_pos, bond_type[1~3])
         mask_tensor =  torch.zeros(max_seq_len, dtype=torch.bool)  # 初期値は False
         mask_tensor[:len(vocab_tree)] = True
 
         parent_data = {}
-        parent_data[0] = (-1, -1, -1, -1, -1, -1)
+        parent_data[0] = (-1, -1, -1, -1)
         sorting_order = [0]
         num = 0
         while num < len(vocab_tree):
             parent_idx = sorting_order[num]
+            parent_token_idx = vocab_tree[parent_idx]['idx']
             num += 1
             for next_vocab in sorted(vocab_tree[parent_idx]['next'], key=lambda x: x[0]):
                 parent_bond_pos = next_vocab[0]
                 next_idx = next_vocab[2][0]
+                next_token_idx = vocab_tree[next_idx]['idx']
                 bond_pos = next_vocab[2][1]
                 sorting_order.append(next_idx)
                 parent_atom_idx = vocab_tree[parent_idx]['frag'][parent_bond_pos*2+1]
                 atom_idx = vocab_tree[next_idx]['frag'][bond_pos*2+1]
+                parent_atom_pos = torch.where(self.joint_potential_tensor[parent_token_idx,:,0]==parent_atom_idx)[0]
+                atom_pos = torch.where(self.joint_potential_tensor[next_token_idx,:,0]==atom_idx)[0]
                 num_bond = token_to_num_bond(next_vocab[1])
-                parent_data[sorting_order.index(next_idx)] = (sorting_order.index(parent_idx), parent_bond_pos, bond_pos, parent_atom_idx, atom_idx, num_bond)
+                parent_data[sorting_order.index(next_idx)] = (sorting_order.index(parent_idx), parent_atom_pos, atom_pos, num_bond)
 
         for i, vocab_i in enumerate(sorting_order):
             vocab = vocab_tree[vocab_i]
@@ -306,30 +314,77 @@ class Vocab:
 
     def detensorize(self, vocab_tensor, order_tensor, mask_tensor):
         # 空の vocab_tree を作成
-        vocab_tree = []
+        nodes = []
 
         # mask_tensor で有効なインデックスのみ処理
         valid_indices = mask_tensor.nonzero(as_tuple=True)[0]
 
         # vocab_tree を再構築
         for idx in valid_indices:
-            vocab_idx = vocab_tensor[idx].item()
-            parent_idx, parent_bond_pos, bond_pos, parent_atom_idx, atom_idx, bond_type_num = \
+            token_idx = vocab_tensor[idx].item()
+            parent_idx, parent_atom_pos, atom_pos, bond_type_num = \
                 order_tensor[idx].tolist()
+            if parent_atom_pos != -1:
+                parent_atom_idx = self.joint_potential_tensor[nodes[parent_idx]['idx'], parent_atom_pos, 0].item()
+            else:
+                parent_atom_idx = -1
+            
+            if atom_pos != -1:
+                atom_idx = self.joint_potential_tensor[token_idx, atom_pos, 0].item()
+            else:
+                atom_idx = -1
             
             # ノードのデータ構造
-            frag_info = self.vocab.inv[vocab_idx]
-            frag = Fragment.from_tuple(frag_info)
+            smiles = self[token_idx]
             node = {
-                'frag': frag, 
-                'idx': vocab_idx,
-                'next': []
+                'smi': smiles,
+                'bonds': [],
+                'idx': token_idx,
+                'next': [],
             }
-            vocab_tree.append(node)
+            # frag = Fragment.from_tuple(frag_info)
+            # node = {
+            #     'frag': frag, 
+            #     'idx': token_idx,
+            #     'next': []
+            # }
+            nodes.append(node)
 
             # 親ノードに 'next' 情報を追加
             if parent_idx >= 0:
-                vocab_tree[parent_idx]['next'].append((parent_bond_pos, frag.bond_list[bond_pos].token, (idx.item(), bond_pos)))
+                nodes[parent_idx]['next'].append((parent_atom_idx, num_bond_to_token(bond_type_num), (idx.item(), atom_idx)))
+                nodes[parent_idx]['bonds'].append((parent_atom_idx, num_bond_to_token(bond_type_num)))
+                nodes[idx.item()]['bonds'].append((atom_idx, num_bond_to_token(bond_type_num)))
+
+        # vocab_treeを構築する
+        vocab_tree = []
+        for node in nodes:
+            smi = node['smi']
+            bond_list = FragBondList(node['bonds'])
+            frag = Fragment(smi, bond_list)
+            vocab_tree.append({'frag': frag, 'idx': node['idx'], 'next': []})
+
+        bond_pos_frags = []
+        for idx, node in enumerate(nodes):
+            for atom_idx, bond_token, (child_idx, child_atom_idx) in node['next']:
+                for bond_id in vocab_tree[idx]['frag'].bond_list.get_bond_ids(atom_idx, bond_token):
+                    if (idx, bond_id) not in bond_pos_frags:
+                        bond_pos_frags.append((idx, bond_id))
+                        break
+                else:
+                    raise ValueError(f"Error: bond not found in next fragment.")
+                
+                child_frag = vocab_tree[child_idx]['frag']
+                for child_bond_id in child_frag.bond_list.get_bond_ids(child_atom_idx, bond_token):
+                    if (child_idx, child_bond_id) not in bond_pos_frags:
+                        bond_pos_frags.append((child_idx, child_bond_id))
+                        break
+                else:
+                    raise ValueError(f"Error: bond not found in child fragment.")
+                
+                vocab_tree[idx]['next'].append((bond_id, bond_token, (child_idx, child_bond_id)))
+                    
+        
 
         # 再構築された vocab_tree を返す
         mol = self.vocab_tree_to_mol(vocab_tree)
@@ -379,18 +434,24 @@ class Vocab:
 
         return node_tensor, edge_tensor, frag_bond_tensor
 
-    def get_target_tensor(self, fragment: Fragment):
+    def get_counter_tensor(self, fragment: Fragment):
         atom_counter_tensor = torch.zeros(len(self.symbol_to_idx), dtype=torch.float32)
-        for atom in fragment.mol.GetAtoms():
-            atom_counter_tensor[self.symbol_to_idx[atom.GetSymbol()]] += 1.0
+        if fragment is not None:
+            for atom in fragment.mol.GetAtoms():
+                atom_counter_tensor[self.symbol_to_idx[atom.GetSymbol()]] += 1.0
         
         inner_bond_counter_tensor = torch.zeros(4, dtype=torch.float32)
-        for bond in fragment.mol.GetBonds():
-            inner_bond_counter_tensor[token_to_num_bond(chem_bond_to_token(bond.GetBondType()))-1] += 1.0
+        if fragment is not None:
+            for bond in fragment.mol.GetBonds():
+                inner_bond_counter_tensor[token_to_num_bond(chem_bond_to_token(bond.GetBondType()))-1] += 1.0
 
-        outer_bond_cnt_tensor = torch.tensor([len(fragment.bond_list)], dtype=torch.float32)
+        if fragment is not None:
+            outer_bond_cnt_tensor = torch.tensor([len(fragment.bond_list)], dtype=torch.float32)
+        else:
+            outer_bond_cnt_tensor = torch.tensor([0], dtype=torch.float32)
 
         return atom_counter_tensor, inner_bond_counter_tensor, outer_bond_cnt_tensor
+    
 
 
 def calculate_advanced_scores(smiles_or_mol: str, sort=False):

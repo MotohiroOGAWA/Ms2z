@@ -6,45 +6,81 @@ import math
 
 
 class FragEmbeddings(nn.Module):
-    def __init__(self, node_dim: int, edge_dim, vocab_size: int, bond_pos_tensor: torch.Tensor) -> None:
+    def __init__(self, 
+                 node_dim: int, edge_dim, 
+                 vocab_size: int, max_joint_cnt: int,
+                 atom_counter, inner_bond_counter, outer_bond_cnt,
+                 ) -> None:
         super().__init__()
-        assert vocab_size+1 == bond_pos_tensor.size(0), "vocab_size and max_bonds size mismatch"
+        # assert vocab_size == joint_info.size(0), "vocab_size and max_bonds size mismatch"
 
         self.embed_dim = node_dim
+        self.edge_dim = edge_dim
         self.vocab_size = vocab_size
         self.embedding = nn.Embedding(vocab_size, node_dim)
+        self.edge_embedding = nn.Embedding(vocab_size, max_joint_cnt*3)
 
-        self.max_bond_cnt = bond_pos_tensor.size(1)
-        self.bond_pos_tensors = bond_pos_tensor
+        self.max_joint_cnt = max_joint_cnt
+        self.joint_linear = nn.Linear(self.max_joint_cnt*3, edge_dim)
 
-        eye_tensor = torch.eye(self.max_bond_cnt, dtype=torch.float32)
-        eye_tensor = torch.cat([eye_tensor, torch.zeros(1, self.max_bond_cnt, dtype=torch.float32)], dim=0)
-        self.one_hot_pos = nn.Parameter(eye_tensor, requires_grad=False)
+        self.atom_counter = nn.Parameter(atom_counter, requires_grad=False)
+        self.inner_bond_counter = nn.Parameter(inner_bond_counter, requires_grad=False)
+        self.outer_bond_cnt = nn.Parameter(outer_bond_cnt, requires_grad=False)
 
-        self.root_bond_pos_project  = nn.Linear(self.max_bond_cnt, node_dim)
-        self.joint_bond_pos_project = nn.Linear(node_dim, edge_dim)
+        self.atom_counter_linear = nn.Sequential(
+            nn.Linear(node_dim, node_dim // 2),
+            nn.ReLU(),
+            nn.Linear(node_dim // 2, atom_counter.size(1)),
+        )
 
-    def forward(self, idx, root_bond_pos = None):
-        # (batch, seq_len) --> (batch, seq_len, node_dim)
-        x = self.calc_embed(idx, root_bond_pos)
+        self.inner_bond_counter_linear = nn.Sequential(
+            nn.Linear(node_dim, node_dim // 2),
+            nn.ReLU(),
+            nn.Linear(node_dim // 2, inner_bond_counter.size(1)),
+        )
+
+        self.outer_bond_cnt_linear = nn.Sequential(
+            nn.Linear(node_dim, node_dim // 2),
+            nn.ReLU(),
+            nn.Linear(node_dim // 2, outer_bond_cnt.size(1)),
+        )
+        self.criterion = nn.MSELoss()
+
+    def forward(self, idx, joint_info = None):
+        # (batch, seq_len) --> (batch, seq_len, node_dim+edge_dim)
+        x = self.embedding(idx)
+        edge_embed = self.joint_embed(idx, joint_info)
+        x = torch.cat([x, edge_embed], dim=-1)
         return x
     
-    def calc_embed(self, idx_tensor, root_bond_pos_tensor):
-        one_hot = self.bond_pos_tensors[idx_tensor]
-        if root_bond_pos_tensor is not None:
-            one_hot += self.one_hot_pos[root_bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
-        w = self.root_bond_pos_project(one_hot) # (batch, seq_len, max_bond_cnt, node_dim)
-
-        embed = self.embedding(idx_tensor)
-        embed = embed * w
-        return embed
+    def joint_embed(self, idx_tensor, joint_info=None):
+        if joint_info is None:
+            edge_embed = torch.zeros_like(idx_tensor.unsqueeze(-1).expand(*idx_tensor.shape, self.edge_dim))
+        else:
+            joint_info = joint_info.reshape(joint_info.size()[:-2], -1) # Shape: (batch, seq_len, joint_kinds, 3) -> (batch, seq_len, joint_kinds*3)
+            joint_info += self.edge_embedding(idx_tensor) # (batch, seq_len, joint_kinds*3)
+            edge_embed = self.joint_linear(joint_info) # (batch, seq_len, edge_dim)
+        
+        return edge_embed
     
-    def joint_embed(self, idx_tensor, root_bond_pos_tensor=None, bond_pos_tensor=None):
-        root_x = self.calc_embed(idx_tensor, root_bond_pos_tensor) # (batch, seq_len, node_dim)
-        x = self.calc_embed(idx_tensor, bond_pos_tensor) # (batch, seq_len, node_dim)
-        joint_x = root_x - x
-        joint_x = self.joint_bond_pos_project(joint_x) # (batch, seq_len, max_bond_cnt, node_dim)
-        return joint_x
+    def calc_counter_loss(self, x):
+        embed = self.embedding(x)
+
+        atom_counter_pred = self.atom_counter_linear(embed)
+        inner_bond_counter_pred = self.inner_bond_counter_linear(embed)
+        outer_bond_counter_pred = self.outer_bond_cnt_linear(embed)
+
+        atom_counter_tgt = self.atom_counter[x]
+        inner_bond_counter_tgt = self.inner_bond_counter[x]
+        outer_bond_counter_tgt = self.outer_bond_cnt[x]
+
+        atom_counter_loss = self.criterion(atom_counter_pred, atom_counter_tgt)
+        inner_bond_counter_loss = self.criterion(inner_bond_counter_pred, inner_bond_counter_tgt)
+        outer_bond_cnt_loss = self.criterion(outer_bond_counter_pred, outer_bond_counter_tgt)
+
+        return atom_counter_loss, inner_bond_counter_loss, outer_bond_cnt_loss
+
+
 
 
 class FeedForwardBlock(nn.Module):

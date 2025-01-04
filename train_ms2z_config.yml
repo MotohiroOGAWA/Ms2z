@@ -1,6 +1,6 @@
 file:
-  tree: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/tensor/vocab_tensors.pt'
-  fp: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/tensor/fp_tensors.pt'
+  tree: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/tensor/tensor.pt'
+  # fp: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/tensor/fp_tensors.pt'
   vocab_file: '/workspaces/Ms2z/mnt/data/graph/pubchem_10k/vocab.pkl'
 
 train: 
@@ -12,20 +12,24 @@ train:
     name: Adam
     lr: 0.001
     eps: !!float 1e-8
-  criterion: BCEwithLogits
-  load_name: 
+  # load_name: ckptest1217
+  load_name: null
   load_epoch: null # 0 or null for no load, 1 for load from epoch 1, -1 for load from last epoch
   load_iter: null # null for no load, 100 for load from iter 100, -1 for load from last iter
   train_size: 0.8
   val_size: 0.1
   test_size: 0.1
-  save_epoch: 1
+  save_epoch: 10
   save_iter: null
 
 model:
-  node_dim: 128
-  edge_dim: 64
+  node_dim: 256
+  edge_dim: 8
   latent_dim: 256
+  decoder_layers: 2
+  decoder_heads: 4
+  decoder_ff_dim: 512
+  decoder_dropout: 0.1
 
 
 

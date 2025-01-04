@@ -84,7 +84,7 @@ class TSVLogger:
         """
         return pd.read_csv(self.log_file_path, delimiter='\t')
 
-    def plot_losses_by_target(self, save_dir_name="log_plot", xlim=None, ylim=None, legend_fontsize=None):
+    def plot_losses_by_target(self, save_dir_name=None, xlim=None, ylim=None, legend_fontsize=None):
         """
         Plot losses for each target_name, separating train and validation data, and save the plots.
 
@@ -129,10 +129,13 @@ class TSVLogger:
             save_dir = os.path.dirname(self.log_file_path) + f"/{save_dir_name}"
             if not os.path.exists(save_dir):
                 os.makedirs(save_dir)
-            plt.savefig(f"{save_dir}/{target}_loss_plot.png")
+            if save_dir_name:
+                plt.savefig(f"{save_dir}/{target}_loss_plot.png")
+            else:
+                plt.show()
             plt.close()
 
-    def plot_all_losses(self, save_dir_name="log_plot", xlim=None, ylim=None, legend_fontsize=None):
+    def plot_all_losses(self, save_dir_name=None, xlim=None, ylim=None, legend_fontsize=None):
         """
         Plot all train and validation losses on the same graph, and save the plot.
 
@@ -171,7 +174,10 @@ class TSVLogger:
         save_dir = os.path.dirname(self.log_file_path) + f"/{save_dir_name}"
         if not os.path.exists(save_dir):
             os.makedirs(save_dir)
-        plt.savefig(f"{save_dir}/all_losses_plot.png")
+        if save_dir_name:
+            plt.savefig(f"{save_dir}/all_losses_plot.png")
+        else:
+            plt.show()
         plt.close()
 
 
