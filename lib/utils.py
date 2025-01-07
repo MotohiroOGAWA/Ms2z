@@ -488,6 +488,7 @@ def frag_to_joint_list(frag_tuple):
     return joint_list
 
 
+
 def count_atoms_in_molecule(mol, ignore_hydrogen=True):
     """
     Count the number of each type of atom in a molecule, optionally ignoring hydrogen atoms.

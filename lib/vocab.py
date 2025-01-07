@@ -5,6 +5,7 @@ from tqdm import tqdm
 import torch
 
 from .utils import *
+from .calc import *
 from .fragment_bond import FragmentBond, FragBondList
 from .fragment import Fragment
 from .fragment_group import FragmentGroup
@@ -78,7 +79,19 @@ class Vocab:
             # build fragment tree
             self.tree = FragmentTree()
             self.tree.add_fragment_list(bond_poteintials)
-        
+
+            # calculate smilarity matrix
+            fp_tensor = smiles_to_fp_tensor([self[i] for i in range(len(self.TOKENS), len(self))])
+            cosine_matrix = compute_cosine_similarity(fp_tensor)
+            self.cosine_matrix = torch.zeros(len(self), len(self), dtype=torch.float32)
+            self.cosine_matrix[:len(self.TOKENS), :len(self.TOKENS)] = torch.eye(len(self.TOKENS))
+            self.cosine_matrix[len(self.TOKENS):, len(self.TOKENS):] = cosine_matrix
+
+            # calculate tgt cosine matrix
+            similarity_weight = torch.full_like(self.cosine_matrix, 0.5)
+            torch.diagonal(similarity_weight).fill_(1.0)
+            self.tgt_cosine_matrix = self.cosine_matrix * similarity_weight
+
         self.fragmentizer = Fragmentizer()
 
         if save_path:
@@ -108,8 +121,13 @@ class Vocab:
             'joint_potential': self.joint_potential_tensor,
             'tree': self.tree.root.to_list(),
             'tree_smi_potential': self.tree.smiles_and_atom_idx_to_potential,
+            'cosine_matrix': self.cosine_matrix,
+            'tgt_cosine_matrix': self.tgt_cosine_matrix,
             'threshold': self.threshold,
-
+            'bos': self.bos,
+            'eos': self.eos,
+            'pad': self.pad,
+            'unk': self.unk,
         }
         return data_to_save
 
@@ -125,6 +143,7 @@ class Vocab:
         joint_potential_data = data['joint_potential']
         tree_data = data['tree']
         tree_smi_potential_data = data['tree_smi_potential']
+        cosine_matrix_data = data['cosine_matrix']
         threshold = data['threshold']
         vocab = Vocab(None, None, None, threshold)
         vocab.idx_to_token = token_data
@@ -132,6 +151,7 @@ class Vocab:
         vocab.joint_potential_tensor = joint_potential_data
         vocab.tree = FragmentTree.from_list(tree_data)
         vocab.tree.smiles_and_atom_idx_to_potential = tree_smi_potential_data
+        vocab.cosine_matrix = cosine_matrix_data
         return vocab
 
     @staticmethod
@@ -280,7 +300,7 @@ class Vocab:
             return None
         
         vocab_tensor = torch.full((max_seq_len,), -1, dtype=torch.int64)
-        order_tensor = torch.full((max_seq_len, 4), -1, dtype=torch.int32) # (parent_idx, parent_atom_pos, atom_pos, bond_type[1~3])
+        order_tensor = torch.full((max_seq_len, 4), -1, dtype=torch.int64) # (parent_idx, parent_atom_pos, atom_pos, bond_type[0~2])
         mask_tensor =  torch.zeros(max_seq_len, dtype=torch.bool)  # 初期値は False
         mask_tensor[:len(vocab_tree)] = True
 
@@ -302,13 +322,13 @@ class Vocab:
                 atom_idx = vocab_tree[next_idx]['frag'][bond_pos*2+1]
                 parent_atom_pos = torch.where(self.joint_potential_tensor[parent_token_idx,:,0]==parent_atom_idx)[0]
                 atom_pos = torch.where(self.joint_potential_tensor[next_token_idx,:,0]==atom_idx)[0]
-                num_bond = token_to_num_bond(next_vocab[1])
+                num_bond = token_to_num_bond(next_vocab[1]) - 1
                 parent_data[sorting_order.index(next_idx)] = (sorting_order.index(parent_idx), parent_atom_pos, atom_pos, num_bond)
 
         for i, vocab_i in enumerate(sorting_order):
             vocab = vocab_tree[vocab_i]
             vocab_tensor[i] = vocab['idx']
-            order_tensor[i] = torch.tensor(parent_data[i], dtype=torch.int32)
+            order_tensor[i] = torch.tensor(parent_data[i], dtype=torch.int64)
 
         return vocab_tensor, order_tensor, mask_tensor
 
@@ -352,9 +372,9 @@ class Vocab:
 
             # 親ノードに 'next' 情報を追加
             if parent_idx >= 0:
-                nodes[parent_idx]['next'].append((parent_atom_idx, num_bond_to_token(bond_type_num), (idx.item(), atom_idx)))
-                nodes[parent_idx]['bonds'].append((parent_atom_idx, num_bond_to_token(bond_type_num)))
-                nodes[idx.item()]['bonds'].append((atom_idx, num_bond_to_token(bond_type_num)))
+                nodes[parent_idx]['next'].append((parent_atom_idx, num_bond_to_token(bond_type_num+1), (idx.item(), atom_idx)))
+                nodes[parent_idx]['bonds'].append((parent_atom_idx, num_bond_to_token(bond_type_num+1)))
+                nodes[idx.item()]['bonds'].append((atom_idx, num_bond_to_token(bond_type_num+1)))
 
         # vocab_treeを構築する
         vocab_tree = []

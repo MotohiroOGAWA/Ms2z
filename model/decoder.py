@@ -8,42 +8,33 @@ import math
 class FragEmbeddings(nn.Module):
     def __init__(self, 
                  node_dim: int, edge_dim, 
-                 vocab_size: int, max_joint_cnt: int,
-                 atom_counter, inner_bond_counter, outer_bond_cnt,
+                 vocab_size: int,
+                 joint_potential,
                  ) -> None:
         super().__init__()
-        # assert vocab_size == joint_info.size(0), "vocab_size and max_bonds size mismatch"
+        assert vocab_size == joint_potential.size(0), "vocab_size and joint mismatch"
 
         self.embed_dim = node_dim
         self.edge_dim = edge_dim
         self.vocab_size = vocab_size
+        self.max_joint_cnt = joint_potential.size(1)
         self.embedding = nn.Embedding(vocab_size, node_dim)
-        self.edge_embedding = nn.Embedding(vocab_size, max_joint_cnt*3)
 
-        self.max_joint_cnt = max_joint_cnt
-        self.joint_linear = nn.Linear(self.max_joint_cnt*3, edge_dim)
 
-        self.atom_counter = nn.Parameter(atom_counter, requires_grad=False)
-        self.inner_bond_counter = nn.Parameter(inner_bond_counter, requires_grad=False)
-        self.outer_bond_cnt = nn.Parameter(outer_bond_cnt, requires_grad=False)
+        # Create a 2D tensor mapping (token_idx, joint_pos) to edge_idx
+        edge_idx_map = torch.full((vocab_size, self.max_joint_cnt), -1, dtype=torch.long)
 
-        self.atom_counter_linear = nn.Sequential(
-            nn.Linear(node_dim, node_dim // 2),
-            nn.ReLU(),
-            nn.Linear(node_dim // 2, atom_counter.size(1)),
-        )
+        # Assign indices directly using a single operation
+        valid_indices = torch.where(joint_potential[:, :, 0] != -1)
+        edge_idx_map[valid_indices] = torch.arange(valid_indices[0].size(0), dtype=torch.long)
+        self.edge_size = valid_indices[0].size(0)
+        self.edge_idx_map = nn.Parameter(edge_idx_map, requires_grad=False)
+        self.edge_embedding = nn.Embedding(self.edge_size+1, edge_dim-3, padding_idx=0)
 
-        self.inner_bond_counter_linear = nn.Sequential(
-            nn.Linear(node_dim, node_dim // 2),
-            nn.ReLU(),
-            nn.Linear(node_dim // 2, inner_bond_counter.size(1)),
-        )
+        # Generate one-hot vectors for bond types
+        one_hot_bond_type = torch.cat([torch.eye(3), torch.zeros(1,3)], dim=0).to(torch.float32) # [4*3]
+        self.bond_type = nn.Parameter(one_hot_bond_type, requires_grad=False) # [-, =, #, nan]
 
-        self.outer_bond_cnt_linear = nn.Sequential(
-            nn.Linear(node_dim, node_dim // 2),
-            nn.ReLU(),
-            nn.Linear(node_dim // 2, outer_bond_cnt.size(1)),
-        )
         self.criterion = nn.MSELoss()
 
     def forward(self, idx, joint_info = None):
@@ -53,14 +44,38 @@ class FragEmbeddings(nn.Module):
         x = torch.cat([x, edge_embed], dim=-1)
         return x
     
-    def joint_embed(self, idx_tensor, joint_info=None):
-        if joint_info is None:
-            edge_embed = torch.zeros_like(idx_tensor.unsqueeze(-1).expand(*idx_tensor.shape, self.edge_dim))
-        else:
-            joint_info = joint_info.reshape(joint_info.size()[:-2], -1) # Shape: (batch, seq_len, joint_kinds, 3) -> (batch, seq_len, joint_kinds*3)
-            joint_info += self.edge_embedding(idx_tensor) # (batch, seq_len, joint_kinds*3)
-            edge_embed = self.joint_linear(joint_info) # (batch, seq_len, edge_dim)
+    def edge_embed(self, joint_pos_tensor):
+        # (:, 3(token_idx, atom_pos, bond_type(0~4))) -> (:, edge_dim)
+        # Handle both 2D and 3D joint_pos_tensor
+        # Reshape to (-1, 2) to index edge_idx_map
+        flat_joint_pos = joint_pos_tensor[...,:2].view(-1, 2)
         
+        # Get edge indices and reshape back to the original shape
+        edge_idx = self.edge_idx_map[flat_joint_pos[:, 0], flat_joint_pos[:, 1]] + 1
+        edge_idx = edge_idx.view(*joint_pos_tensor.shape[:-1])  # Reshape to match input dims
+        
+        # Get edge embeddings
+        edge_embed = self.edge_embedding(edge_idx)
+
+        # Get bond type embeddings
+        bond_type = self.bond_type[joint_pos_tensor[..., 2]]
+
+        # Concatenate edge and bond type embeddings
+        edge_embed = torch.cat([edge_embed, bond_type], dim=-1)
+        return edge_embed
+        
+    
+    def joint_embed(self, idx_tensor, joint_info=None):
+        # joint_info: (batch, seq_len, 2(atom_pos, bond_type(0~4)))
+        if joint_info is None:
+            edge_embed = torch.zeros_like(
+                idx_tensor.unsqueeze(-1).expand(*idx_tensor.shape, self.edge_dim),
+                dtype=self.edge_embedding.weight.dtype,  # Match the data type
+                device=self.edge_embedding.weight.device  # Match the device
+                )
+        else:
+            token_and_joint_tensor = torch.cat([idx_tensor.unsqueeze(-1), joint_info], dim=-1)
+            edge_embed = self.edge_embed(token_and_joint_tensor)
         return edge_embed
     
     def calc_counter_loss(self, x):
@@ -362,37 +377,37 @@ class HierGATBlock(nn.Module):
 
         return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
     
-class SelfGATBlock(nn.Module):
-    def __init__(self, embed_dim, edge_dim, heads, ff_dim, dropout=0.1):
-        super(SelfGATBlock, self).__init__()
-        self.gat = GATLayer(embed_dim, embed_dim, edge_dim)
-        self.self_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
+# class SelfGATBlock(nn.Module):
+#     def __init__(self, embed_dim, edge_dim, heads, ff_dim, dropout=0.1):
+#         super(SelfGATBlock, self).__init__()
+#         self.gat = GATLayer(embed_dim, embed_dim, edge_dim)
+#         self.self_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
                 
-        # Feed Forward Block
-        self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
+#         # Feed Forward Block
+#         self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
 
-        # Layer Normalization
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.norm3 = nn.LayerNorm(embed_dim)
+#         # Layer Normalization
+#         self.norm1 = nn.LayerNorm(embed_dim)
+#         self.norm2 = nn.LayerNorm(embed_dim)
+#         self.norm3 = nn.LayerNorm(embed_dim)
         
-        # Dropout
-        self.dropout = nn.Dropout(dropout)
+#         # Dropout
+#         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges=None):
-        # Shape of x [batch_size, seq_len, in_features]
-        # Shape of unk_feature [in_features]
-        # Shape of enc_output [batch_size, 1, dim]
-        x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
-        x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
+#     def forward(self, x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges=None):
+#         # Shape of x [batch_size, seq_len, in_features]
+#         # Shape of unk_feature [in_features]
+#         # Shape of enc_output [batch_size, 1, dim]
+#         x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
+#         x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
 
-        x = self.self_attention(x, x, x, node_mask)
-        x = self.norm2(x + self.dropout(x))
+#         x = self.self_attention(x, x, x, node_mask)
+#         x = self.norm2(x + self.dropout(x))
 
-        x = self.feed_forward(x)
-        x = self.norm3(x + self.dropout(x))
+#         x = self.feed_forward(x)
+#         x = self.norm3(x + self.dropout(x))
 
-        return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
+#         return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
     
 
 class MultiHeadAttentionBlock(nn.Module):

@@ -35,11 +35,13 @@ def main(
     mask_tensors = []
     fp_tensors = []
     failed_smiles_file = os.path.join(work_dir, 'error_smiles.txt')
+    with open(failed_smiles_file, 'w') as f:
+        f.write('')
 
     with tqdm(total=len(smiles_list), mininterval=0.5) as pbar:
         for smiles in smiles_list:
-            # try:
-            if True:
+            try:
+            # if True:
                 output_smiles = 'None'
                 input_mol = Chem.MolFromSmiles(smiles)
                 input_smiles = Chem.MolToSmiles(input_mol, canonical=True)
@@ -69,8 +71,8 @@ def main(
                 fp_tensors.append(fp_tensor)
 
                 success_cnt += 1
-            # except Exception as e:
-            elif False:
+            except Exception as e:
+            # elif False:
                 # if str(e) == 'Error: Ring not in vocabulary.':
                 #     total_cnt -= 1
                 #     continue
@@ -81,8 +83,8 @@ def main(
                     error_message = str(e).replace('\n', ', ')
                     f.write(f'{total_cnt}\t{smiles}\t{output_smiles}\t{error_message}\n')
                     pass
-            # finally:
-            if True:
+            finally:
+            # if True:
                 pbar.update(1)
                 total_cnt += 1
                 pbar.set_postfix_str(f'Success: {success_cnt}/{total_cnt} ({success_cnt/total_cnt:.2%})')
@@ -90,6 +92,7 @@ def main(
     order_tensors = torch.stack(order_tensors)
     mask_tensors = torch.stack(mask_tensors)
     fp_tensors = torch.stack(fp_tensors)
+    max_valid_len_counts = torch.max(torch.sum(mask_tensors, dim=1)).item()
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     torch.save({
@@ -99,11 +102,11 @@ def main(
         'length': max_seq_len,
         'vocab_size': len(vocab),
         'fingerprints': fp_tensors,
-        'fp_size': fp_tensors.size(1)
+        'fp_size': fp_tensors.size(1),
+        'max_valid_seq_len': max_valid_len_counts,
     }, output_file)
     # torch.save(fp_tensors, os.path.join(work_dir, 'tensor', 'fp_tensors.pt'))
 
-    max_valid_len_counts = torch.max(torch.sum(mask_tensors, dim=1))
     print(f'Maximum valid length: {max_valid_len_counts}')
 
 # print('\n'.join([f'{i}: {vocab}' for i, vocab in enumerate(vocab_list)]))

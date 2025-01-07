@@ -7,10 +7,10 @@ import torch
 import numpy as np
 import dill
 
-from lib.torch_utils import load_dataset, get_optimizer, get_criterion, save_dataset, save_model, load_model
-from mnt.model.data_pipeline import get_ds
-from lib.ms2z import Ms2z
-from lib.logger import TSVLogger
+from model.torch_utils import load_dataset, get_optimizer, get_criterion, save_dataset, save_model, load_model
+from model.data_pipeline import get_ds
+from model.ms2z import Ms2z
+from model.logger import TSVLogger
 
 def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, epochs,
          train_size, val_size, test_size,
@@ -110,19 +110,18 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{max_epoch}")
         for batch in batch_iterator:
-            tree_tensor = batch['vocab'].to(device)
+            tree_tensor = batch['token'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
             fp_tensor = batch['fp'].to(device)
 
             # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-            token_loss, bp_loss, kl_divergence_loss, fp_loss, \
-                 atom_counter_loss, inner_bond_counter_loss, outer_bond_cnt_loss = \
+            token_loss, token_sim_loss, kl_divergence_loss, fp_loss, = \
                 model(tree_tensor, order_tensor, mask_tensor, fp_tensor)
             # loss = token_loss + 0.5 * bp_loss + kl_divergence_loss + fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
             # loss = fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
-            loss = fp_loss + kl_divergence_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
+            loss = fp_loss + kl_divergence_loss + token_sim_loss
 
             loss.backward()
             optimizer.step()
@@ -137,32 +136,30 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             global_step += 1
     
             batch_iterator.set_postfix({
-                # "loss": f"{loss.item():6.3f}", 'token': f"{token_loss.item():6.3f}", 
-                # 'bp': f"{bp_loss.item():6.3f}", 'KL': f"{kl_divergence_loss.item():6.3f}", 
+                "loss": f"{loss.item():6.3f}", 'token': f"{token_loss.item():6.3f}", 
+                'ts': f"{token_sim_loss.item():6.3f}", 'KL': f"{kl_divergence_loss.item():6.3f}", 
                 'FP': f"{fp_loss.item():6.3f}",
-                'ac': f"{atom_counter_loss.item():6.3f}",
-                'ibc': f"{inner_bond_counter_loss.item():6.3f}",
-                'obc': f"{outer_bond_cnt_loss.item():6.3f}"})
+                })
 
             current_time = time.time() - start_time
-            # logger.log(
-            #     "train", 
-            #     epoch=epoch+1, global_step=global_step, 
-            #     loss_type='', target_name='TotalLoss', loss_value=loss.item(), 
-            #     data_size=tree_tensor.shape[0], accuracy=None, 
-            #     learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
-            # logger.log(
-            #     "train", 
-            #     epoch=epoch+1, global_step=global_step, 
-            #     loss_type='', target_name='TokenLoss', loss_value=token_loss.item(), 
-            #     data_size=tree_tensor.shape[0], accuracy=None, 
-            #     learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
-            # logger.log(
-            #     "train", 
-            #     epoch=epoch+1, global_step=global_step, 
-            #     loss_type='', target_name='BondPosLoss', loss_value=bp_loss.item(), 
-            #     data_size=tree_tensor.shape[0], accuracy=None, 
-            #     learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type='', target_name='TotalLoss', loss_value=loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type='', target_name='TokenLoss', loss_value=token_loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
+            logger.log(
+                "train", 
+                epoch=epoch+1, global_step=global_step, 
+                loss_type='', target_name='TokenSimLoss', loss_value=token_loss.item(), 
+                data_size=tree_tensor.shape[0], accuracy=None, 
+                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
@@ -173,24 +170,6 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
                 loss_type='BCELoss', target_name='fingerprint', loss_value=fp_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
-                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
-            logger.log(
-                "train", 
-                epoch=epoch+1, global_step=global_step, 
-                loss_type='MSELoss', target_name='atom_counter', loss_value=atom_counter_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
-                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
-            logger.log(
-                "train", 
-                epoch=epoch+1, global_step=global_step, 
-                loss_type='MSELoss', target_name='inner_bond_counter', loss_value=inner_bond_counter_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
-                learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
-            logger.log(
-                "train", 
-                epoch=epoch+1, global_step=global_step, 
-                loss_type='MSELoss', target_name='outer_bond_cnt', loss_value=outer_bond_cnt_loss.item(), 
                 data_size=tree_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
 

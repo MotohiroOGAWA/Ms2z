@@ -11,7 +11,8 @@ class ChildSumTreeLSTMCell(nn.Module):
     def __init__(self, node_dim, edge_dim, h_size):
         super(ChildSumTreeLSTMCell, self).__init__()
 
-        self.x_size = node_dim
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
         self.h_size = h_size
 
         # Forget gate
@@ -109,31 +110,31 @@ class ChildSumTreeLSTMCell(nn.Module):
         
         return {"h": h, "c": c}
 
-class GATEncoder(nn.Module):
-    def __init__(self, num_layers, embed_dim, edge_dim, num_heads, ff_dim, dropout=0.1):
-        super(GATEncoder, self).__init__()
-        self.layers = nn.ModuleList([SelfGATBlock(embed_dim, edge_dim, num_heads, ff_dim, dropout) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(embed_dim)
+# class GATEncoder(nn.Module):
+#     def __init__(self, num_layers, embed_dim, edge_dim, num_heads, ff_dim, dropout=0.1):
+#         super(GATEncoder, self).__init__()
+#         self.layers = nn.ModuleList([SelfGATBlock(embed_dim, edge_dim, num_heads, ff_dim, dropout) for _ in range(num_layers)])
+#         self.norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x, edge_index, edge_attr, unk_feature, tgt_mask, memory_mask):
-        # x: (batch_size, 1, tgt_seq_len, embed_dim)
+#     def forward(self, x, edge_index, edge_attr, unk_feature, tgt_mask, memory_mask):
+#         # x: (batch_size, 1, tgt_seq_len, embed_dim)
 
-        x, edge_index, edge_attr, node_mask, edge_mask = GATLayer.expand_data(x, edge_index, edge_attr, unk_feature, tgt_mask)
-        _valid_edges = None
-        for layer in self.layers:
-            x, _valid_edges = layer(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
+#         x, edge_index, edge_attr, node_mask, edge_mask = GATLayer.expand_data(x, edge_index, edge_attr, unk_feature, tgt_mask)
+#         _valid_edges = None
+#         for layer in self.layers:
+#             x, _valid_edges = layer(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
         
-        # Convert the values of the last unknown node for each batch and sequence to the new connected node
-        # Shape: [batch_size, seq_len, num_nodes, node_dim] -> [batch_size, seq_len, node_dim]
-        # Create an index tensor for the unknown node positions
-        unknown_indices = torch.arange(x.size(1), device=x.device).view(1, -1) + 1  # Shape: [1, seq_len]
-        # unknown_indices = unknown_indices.unsqueeze(0).expand(x.size(0), -1)  # Shape: [batch_size, seq_len]
-        x = x[torch.arange(x.size(0), device=x.device).unsqueeze(1), torch.arange(x.size(1), device=x.device).unsqueeze(0), unknown_indices]  # Shape: [batch_size, seq_len, node_dim]
+#         # Convert the values of the last unknown node for each batch and sequence to the new connected node
+#         # Shape: [batch_size, seq_len, num_nodes, node_dim] -> [batch_size, seq_len, node_dim]
+#         # Create an index tensor for the unknown node positions
+#         unknown_indices = torch.arange(x.size(1), device=x.device).view(1, -1) + 1  # Shape: [1, seq_len]
+#         # unknown_indices = unknown_indices.unsqueeze(0).expand(x.size(0), -1)  # Shape: [batch_size, seq_len]
+#         x = x[torch.arange(x.size(0), device=x.device).unsqueeze(1), torch.arange(x.size(1), device=x.device).unsqueeze(0), unknown_indices]  # Shape: [batch_size, seq_len, node_dim]
 
-        # 最後に正規化を適用
-        x = self.norm(x)
-        # x: (batch_size, tgt_seq_len, embed_dim)
-        return x
+#         # 最後に正規化を適用
+#         x = self.norm(x)
+#         # x: (batch_size, tgt_seq_len, embed_dim)
+#         return x
 
 
 class StructureEncoder(nn.Module):
@@ -143,7 +144,7 @@ class StructureEncoder(nn.Module):
         self.h_size = h_size
 
         # TreeLSTM cell
-        self.cell = ChildSumTreeLSTMCell(node_dim, edge_dim, h_size)
+        self.cell = ChildSumTreeLSTMCell(node_dim+edge_dim, edge_dim, h_size)
 
         # Linear transformations
         self.dropout = nn.Dropout(dropout_rate)

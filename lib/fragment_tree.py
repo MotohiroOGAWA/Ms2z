@@ -305,11 +305,11 @@ class FragmentTree:
                             frag = False
                             break
                         if bond_info[0] > 0:
-                            pre_bond_list.extend([(atom_idx, '-')*bond_info[0]])
+                            pre_bond_list.extend([(atom_idx, '-')]*bond_info[0])
                         if bond_info[1] > 0:
-                            pre_bond_list.extend([(atom_idx, '=')*bond_info[1]])
+                            pre_bond_list.extend([(atom_idx, '=')]*bond_info[1])
                         if bond_info[2] > 0:
-                            pre_bond_list.extend([(atom_idx, '#')*bond_info[2]])
+                            pre_bond_list.extend([(atom_idx, '#')]*bond_info[2])
                     if not frag:
                         continue
 
@@ -317,7 +317,15 @@ class FragmentTree:
                     qry_frag = Fragment(qry_frag_smiles, bond_list)
 
                     matched_q_to_t_global_atom_map = [current_frag.atom_map[match_idx] for match_idx in match]
-
+                    matches2 = current_frag.GetSubstructMatches(qry_frag)
+                    if len(matches2) == 0:
+                        continue
+                    for match in matches2:
+                        if start_global_atom_idx in match:
+                            break
+                    else:
+                        continue
+                    matched_q_to_t_global_atom_map = [match_global_idx for match_global_idx in match]
                     break
             else:
                 raise ValueError(f'Not Found Atom Token: {current_frag}')
