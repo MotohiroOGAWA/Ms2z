@@ -67,7 +67,7 @@ class Ms2z(nn.Module):
         self.fp_layer1 = nn.Linear(latent_dim, 2*fp_dim)
         self.fp_layer2 = nn.Linear(2*fp_dim, fp_dim)
         self.fp_dropout = nn.Dropout(0.1)
-        self.fp_sigmoid = nn.Sigmoid()
+        self.fp_loss_fn = nn.MSELoss(reduction='none')
 
     def forward(self, vocab_tensor, order_tensor, mask_tensor, fp_tensor):
         """
@@ -170,6 +170,7 @@ class Ms2z(nn.Module):
         token_similarity_loss_weights = torch.full_like(token_similarity_loss, other_weight)
         token_similarity_loss_weights[torch.arange(tgt_flat.size(0)), tgt_flat] = self.tgt_token_priority_weight
         token_similarity_loss = torch.sum(token_similarity_loss * token_similarity_loss_weights, dim=1).mean()
+        # token_similarity_loss = torch.sum(token_similarity_loss * token_similarity_loss_weights, dim=1).mean()
         # bond_pos_prediction_loss = loss_fn2(logits_bond_pos, tgt_bond_pos_flat)
 
         # KL Divergence loss
@@ -178,14 +179,26 @@ class Ms2z(nn.Module):
 
 
         # fingerprint loss
-        fp_x = self.fp_layer1(mean)
+        fp_x = self.fp_layer1(z)
         fp_x = torch.relu(fp_x)
         fp_x = self.fp_layer2(fp_x)
         fp_x = self.fp_dropout(fp_x)
-        fp_x = self.fp_sigmoid(fp_x)
+        # fp_x = torch.sigmoid(fp_x)
+        fp_x_binary = torch.where(fp_x < 0.5, torch.tensor(0.0, device=fp_x.device), torch.tensor(1.0, device=fp_x.device))
 
-        fp_loss_fn = nn.BCELoss()
-        fp_loss = fp_loss_fn(fp_x, fp_tensor)
+        element_wise_loss  = self.fp_loss_fn(fp_x, fp_tensor)
+        fp_acc = self.fp_loss_fn(fp_x_binary, fp_tensor).mean()
+
+        # Create masks for 0 and 1 in fp_tensor
+        zero_mask = (fp_tensor == 0)  # Shape: [batch_size, fp_size]
+        one_mask = (fp_tensor == 1)  # Shape: [batch_size, fp_size]
+
+        # Compute the mean loss for zero_mask and one_mask
+        zero_loss_mean = torch.sum(element_wise_loss * zero_mask, dim=1) / (zero_mask.sum(dim=1) + 1e-8)  # Shape: [batch_size]
+        one_loss_mean = torch.sum(element_wise_loss * one_mask, dim=1) / (one_mask.sum(dim=1) + 1e-8)    # Shape: [batch_size]
+
+        # Compute the final loss as the average of zero_loss_mean and one_loss_mean
+        fp_loss = (zero_loss_mean + one_loss_mean).mean()
 
 
         # counter loss

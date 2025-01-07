@@ -9,7 +9,7 @@ from collections import Counter, defaultdict
 
 bond_priority = bidict({'-': 0, '=': 1, '#': 2, ':': 3})
 
-def read_smiles(file_path, binary = None, split_smi = True):
+def read_smiles(file_path, binary = None, split_smi = True, duplicate = False):
     if binary is None:
         if file_path.endswith('.pkl'):
             binary = True
@@ -29,6 +29,9 @@ def read_smiles(file_path, binary = None, split_smi = True):
                 smiles = [s.strip() for line in f for s in line.strip("\r\n ").split('.')]
             else:
                 smiles = [line.strip("\r\n ").split()[0] for line in f]
+    
+    if not duplicate:
+        smiles = list(set(smiles))
             
     return smiles
 

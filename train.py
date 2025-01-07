@@ -6,6 +6,8 @@ from datetime import datetime
 import torch
 import numpy as np
 import dill
+import re
+from collections import defaultdict
 
 from model.torch_utils import load_dataset, get_optimizer, get_criterion, save_dataset, save_model, load_model
 from model.data_pipeline import get_ds
@@ -47,15 +49,8 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     else:
         input_file = files['tree']
 
-        input_tensor = torch.load(input_file)
-
-        token_tensor = input_tensor['vocab']
-        order_tensor = input_tensor['order']
-        mask_tensor = input_tensor['mask']
-        max_seq_len = input_tensor['length']
-        vocab_size = input_tensor['vocab_size']
-        fingerprint_tensor = input_tensor['fingerprints']
-        fp_dim = input_tensor['fp_size']
+        token_tensor, order_tensor, mask_tensor, max_seq_len, \
+            vocab_size, fingerprint_tensor, fp_dim = read_tensor_file(input_file)
         
         variables = {
             'token': token_tensor,
@@ -70,6 +65,8 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         # if dataset_save_dir == '':
         #     dataset_save_dir = os.path.join(load_dir, 'ds')
         save_dataset(load_dir, dataset, train_dataloader, val_dataloader, test_dataloader)
+        train_dataloader_by_level = {}
+        train_dataloader_by_level[-1] = [dataset, train_dataloader, val_dataloader, test_dataloader]
 
         load_epoch = 0
         load_path = None
@@ -105,33 +102,57 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     val_loss_list = np.zeros([0])
     logger = TSVLogger(os.path.join(load_dir, 'logs.tsv')) 
 
+    level = 0
+    input_files_by_level = get_tensor_files(os.path.dirname(input_file))
     start_time = time.time()
     for epoch in range(initial_epoch, max_epoch):
         model.train()
-        batch_iterator = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{max_epoch}")
+        if level not in train_dataloader_by_level:
+            token_tensor, order_tensor, mask_tensor, max_seq_len, \
+                vocab_size, fingerprint_tensor, fp_dim = read_tensor_file(input_files_by_level[level])
+        
+            _variables = {
+                'token': token_tensor,
+                'order': order_tensor,
+                'mask': mask_tensor,
+                'fp': fingerprint_tensor
+            }
+            _dataset, _train_dataloader, _val_dataloader, _test_dataloader \
+              = get_ds(_variables, mode='train', batch_size=batch_size, 
+                        train_size=train_size/(train_size+val_size), 
+                        val_size=val_size/(train_size+val_size), 
+                        test_size=None,
+                       device=torch.device('cpu'))
+            train_dataloader_by_level[level] = [_dataset, _train_dataloader, _val_dataloader, _test_dataloader]
+
+        _train_dataloader = train_dataloader_by_level[level][1]
+        batch_iterator = tqdm(_train_dataloader, desc=f"Epoch(lv.{level}) {epoch+1}/{max_epoch}")
+        param_update_cnt = defaultdict(int)
         for batch in batch_iterator:
-            tree_tensor = batch['token'].to(device)
+            token_tensor = batch['token'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
             fp_tensor = batch['fp'].to(device)
 
-            # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
+            param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
             token_loss, token_sim_loss, kl_divergence_loss, fp_loss, = \
-                model(tree_tensor, order_tensor, mask_tensor, fp_tensor)
-            # loss = token_loss + 0.5 * bp_loss + kl_divergence_loss + fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
-            # loss = fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
-            loss = fp_loss + kl_divergence_loss + token_sim_loss
+                model(token_tensor, order_tensor, mask_tensor, fp_tensor)
+            
+            loss = fp_loss + kl_divergence_loss
+            # loss = fp_loss + token_sim_loss + kl_divergence_loss
 
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
 
-            # for name, param in model.named_parameters():
-            #     if not torch.equal(param.data, param_backup[name]):
-            #         print(f"Parameter '{name}' was updated.")
-            #     else:
-            #         print(f"Parameter '{name}' was NOT updated.")
+            for name, param in model.named_parameters():
+                if not torch.equal(param.data, param_backup[name]):
+                    print(f"Parameter '{name}' was updated.")
+                    param_update_cnt[name] += 1
+                else:
+                    print(f"Parameter '{name}' was NOT updated.")
+                    param_update_cnt[name] += 0
 
             global_step += 1
     
@@ -146,31 +167,31 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
                 loss_type='', target_name='TotalLoss', loss_value=loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
+                data_size=token_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
                 loss_type='', target_name='TokenLoss', loss_value=token_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
+                data_size=token_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
-                loss_type='', target_name='TokenSimLoss', loss_value=token_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
+                loss_type='', target_name='TokenSimLoss', loss_value=token_sim_loss.item(), 
+                data_size=token_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
                 loss_type='', target_name='KL_divergence_loss', loss_value=kl_divergence_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
+                data_size=token_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
             logger.log(
                 "train", 
                 epoch=epoch+1, global_step=global_step, 
                 loss_type='BCELoss', target_name='fingerprint', loss_value=fp_loss.item(), 
-                data_size=tree_tensor.shape[0], accuracy=None, 
+                data_size=token_tensor.shape[0], accuracy=None, 
                 learning_rate=optimizer.param_groups[0]['lr'], timestamp=current_time)
 
             # Save the model and optimizer
@@ -181,7 +202,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                 print(f"Model and optimizer saved at {save_path}")
                 
         # Validation
-        # val_loss = run_validation(model, val_dataloader, logger, global_step, epoch+1, timestamp=current_time)
+        # val_loss = run_validation(model, _val_dataloader, logger, global_step, epoch+1, timestamp=current_time)
         # val_loss_list = np.append(val_loss_list, val_loss)
         # print(f"Validation Loss after epoch {epoch+1}: {val_loss}")
         
@@ -213,17 +234,16 @@ def run_validation(model, val_dataloader, logger, global_step, epoch, timestamp=
 
     with torch.no_grad():
         for batch in tqdm(val_dataloader, desc="Running Validation"):
-            tree_tensor = batch['vocab'].to(device)
+            token_tensor = batch['token'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
             fp_tensor = batch['fp'].to(device)
 
-            token_mismatch_loss, bp_loss, kl_divergence_loss, fp_loss, \
-                atom_counter_loss, inner_bond_counter_loss, outer_bond_cnt_loss  = \
-                    model(tree_tensor, order_tensor, mask_tensor, fp_tensor)
+            token_loss, token_sim_loss, kl_divergence_loss, fp_loss, = \
+                model(token_tensor, order_tensor, mask_tensor, fp_tensor)
             
             loss = token_mismatch_loss + 0.5 * bp_loss + kl_divergence_loss + fp_loss + atom_counter_loss + inner_bond_counter_loss + outer_bond_cnt_loss
-            samples = tree_tensor.shape[0]
+            samples = token_tensor.shape[0]
 
             total_samples += samples
             val_loss += loss.item() * samples
@@ -297,7 +317,38 @@ def run_validation(model, val_dataloader, logger, global_step, epoch, timestamp=
     return avg_val_loss
 
 
+def read_tensor_file(input_file):
+    input_tensor = torch.load(input_file)
 
+    token_tensor = input_tensor['vocab']
+    order_tensor = input_tensor['order']
+    mask_tensor = input_tensor['mask']
+    max_seq_len = input_tensor['length']
+    vocab_size = input_tensor['vocab_size']
+    fingerprint_tensor = input_tensor['fingerprints']
+    fp_dim = input_tensor['fp_size']
+
+    return token_tensor, order_tensor, mask_tensor, max_seq_len, vocab_size, fingerprint_tensor, fp_dim
+
+def get_tensor_files(directory):
+    """
+    Retrieve all tensor files with numbers in their names from the specified directory.
+    Args:
+        directory (str): Path to the directory containing the tensor files.
+
+    Returns:
+        dict: A dictionary where keys are numbers and values are corresponding file names.
+    """
+    tensor_files = {}
+    pattern = re.compile(r'tensor_level(\d+)\.pt')  # Regex to match 'tensor_level{number}.pt'
+
+    for file_name in os.listdir(directory):
+        match = pattern.match(file_name)
+        if match:
+            level = int(match.group(1))  # Extract the number
+            tensor_files[level] = os.path.join(directory, file_name)
+
+    return tensor_files
 
 def default_param():
     config = {

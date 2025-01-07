@@ -81,11 +81,12 @@ class Vocab:
             self.tree.add_fragment_list(bond_poteintials)
 
             # calculate smilarity matrix
-            fp_tensor = smiles_to_fp_tensor([self[i] for i in range(len(self.TOKENS), len(self))])
+            fp_tensor = smiles_to_fp_tensor([self[i] for i in range(len(self.TOKENS), len(self))]).to(torch.device('cpu'))
             cosine_matrix = compute_cosine_similarity(fp_tensor)
             self.cosine_matrix = torch.zeros(len(self), len(self), dtype=torch.float32)
             self.cosine_matrix[:len(self.TOKENS), :len(self.TOKENS)] = torch.eye(len(self.TOKENS))
             self.cosine_matrix[len(self.TOKENS):, len(self.TOKENS):] = cosine_matrix
+            self.fp_tensor = torch.cat([torch.zeros(len(self.TOKENS),fp_tensor.size(1), dtype=fp_tensor.dtype), fp_tensor], dim=0)
 
             # calculate tgt cosine matrix
             similarity_weight = torch.full_like(self.cosine_matrix, 0.5)
@@ -121,6 +122,7 @@ class Vocab:
             'joint_potential': self.joint_potential_tensor,
             'tree': self.tree.root.to_list(),
             'tree_smi_potential': self.tree.smiles_and_atom_idx_to_potential,
+            'fingerprint': self.fp_tensor,
             'cosine_matrix': self.cosine_matrix,
             'tgt_cosine_matrix': self.tgt_cosine_matrix,
             'threshold': self.threshold,
@@ -143,7 +145,9 @@ class Vocab:
         joint_potential_data = data['joint_potential']
         tree_data = data['tree']
         tree_smi_potential_data = data['tree_smi_potential']
+        fingerprint_data = data['fingerprint']
         cosine_matrix_data = data['cosine_matrix']
+        tgt_cosine_matrix = data['tgt_cosine_matrix']
         threshold = data['threshold']
         vocab = Vocab(None, None, None, threshold)
         vocab.idx_to_token = token_data
@@ -151,7 +155,9 @@ class Vocab:
         vocab.joint_potential_tensor = joint_potential_data
         vocab.tree = FragmentTree.from_list(tree_data)
         vocab.tree.smiles_and_atom_idx_to_potential = tree_smi_potential_data
+        vocab.fp_tensor = fingerprint_data
         vocab.cosine_matrix = cosine_matrix_data
+        vocab.tgt_cosine_matrix = tgt_cosine_matrix
         return vocab
 
     @staticmethod
@@ -323,7 +329,6 @@ class Vocab:
                 parent_atom_pos = torch.where(self.joint_potential_tensor[parent_token_idx,:,0]==parent_atom_idx)[0]
                 atom_pos = torch.where(self.joint_potential_tensor[next_token_idx,:,0]==atom_idx)[0]
                 num_bond = token_to_num_bond(next_vocab[1]) - 1
-                level = parent_data[parent_idx][4] + 1
                 parent_data[sorting_order.index(next_idx)] = [sorting_order.index(parent_idx), parent_atom_pos, atom_pos, num_bond, -1]
 
         max_level = max([parent_data[i][4] for i in range(len(parent_data))])

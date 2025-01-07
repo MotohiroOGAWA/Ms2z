@@ -18,7 +18,7 @@ class BsDataset(TensorDataset):
 
 def get_ds(
         variables: Dict[str, torch.Tensor], mode: str, 
-        train_size: float = 0.8, val_size: float = 0.1, test_size: float = 0.1, 
+        train_size: float = 0.8, val_size: float = 0.1, test_size: float = None, 
         batch_size: int = 8, device: torch.device = torch.device('cpu')):
     """
     Function to create datasets and dataloaders for train, validation, and test modes.
@@ -41,8 +41,12 @@ def get_ds(
     if mode == 'train':
         # Calculate sizes for train, validation, and test datasets
         train_ds_size = int(train_size * len(dataset))
-        val_ds_size = int(val_size * len(dataset))
-        test_ds_size = len(dataset) - train_ds_size - val_ds_size
+        if test_size is None:
+            val_ds_size = len(dataset) - train_ds_size
+            test_ds_size = 0
+        else:
+            val_ds_size = int(val_size * len(dataset))
+            test_ds_size = len(dataset) - train_ds_size - val_ds_size
 
         # Split the dataset into train, validation, and test datasets
         train_ds, val_ds, test_ds = random_split(dataset, [train_ds_size, val_ds_size, test_ds_size])
