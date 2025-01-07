@@ -28,12 +28,20 @@ def main(
     smiles_list = read_smiles(smiles_file)
     # smiles_list = [s for smiles in smiles_list for s in smiles.split('.')]
 
+    by_level = True
     total_cnt = 0
     success_cnt = 0
     vocab_tensors = []
     order_tensors = []
     mask_tensors = []
     fp_tensors = []
+
+    vocab_tensors_by_level = defaultdict(list)
+    order_tensors_by_level = defaultdict(list)
+    mask_tensors_by_level = defaultdict(list)
+    fp_tensors_by_level = defaultdict(list)
+    tree_str_by_level = defaultdict(list)
+
     failed_smiles_file = os.path.join(work_dir, 'error_smiles.txt')
     with open(failed_smiles_file, 'w') as f:
         f.write('')
@@ -71,6 +79,33 @@ def main(
                 fp_tensors.append(fp_tensor)
 
                 success_cnt += 1
+
+
+                if by_level:
+                    tensor_by_level = vocab.tensorize_by_level(*tensor)
+                    
+                    for i, data in tensor_by_level.items():
+                        try:
+                            tensor2 = data['tensor']
+                            level = data['level']
+                            vocab_tensor2, order_tensor2, mask_tensor2 = tensor2
+                            output_mol = vocab.detensorize(*tensor2)
+                            output_smiles = Chem.MolToSmiles(output_mol, canonical=True)
+                            maccs_fp = MACCSkeys.GenMACCSKeys(output_mol)
+                            fp_tensor = torch.tensor(list(maccs_fp), dtype=torch.float32)
+
+                            tree_str = output_smiles + ',' + ','.join([str(x.item()) for x in vocab_tensor2[mask_tensor2]])
+
+                            if tree_str not in tree_str_by_level[level]:
+                                vocab_tensors_by_level[level].append(vocab_tensor2)
+                                order_tensors_by_level[level].append(order_tensor2)
+                                mask_tensors_by_level[level].append(mask_tensor2)
+                                fp_tensors_by_level[level].append(fp_tensor)
+                                tree_str_by_level[level].append(tree_str)
+
+                        except Exception as e:
+                            pass
+
             except Exception as e:
             # elif False:
                 # if str(e) == 'Error: Ring not in vocabulary.':
@@ -88,11 +123,15 @@ def main(
                 pbar.update(1)
                 total_cnt += 1
                 pbar.set_postfix_str(f'Success: {success_cnt}/{total_cnt} ({success_cnt/total_cnt:.2%})')
+
+
     vocab_tensors = torch.stack(vocab_tensors)
     order_tensors = torch.stack(order_tensors)
     mask_tensors = torch.stack(mask_tensors)
     fp_tensors = torch.stack(fp_tensors)
+
     max_valid_len_counts = torch.max(torch.sum(mask_tensors, dim=1)).item()
+    max_level = torch.max(order_tensors[:,:,4]).item()
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     torch.save({
@@ -104,10 +143,42 @@ def main(
         'fingerprints': fp_tensors,
         'fp_size': fp_tensors.size(1),
         'max_valid_seq_len': max_valid_len_counts,
+        'max_level': max_level,
     }, output_file)
     # torch.save(fp_tensors, os.path.join(work_dir, 'tensor', 'fp_tensors.pt'))
 
     print(f'Maximum valid length: {max_valid_len_counts}')
+    print(f'Maximum level: {max_level}')
+
+
+    tensor_stats_file = os.path.join(os.path.dirname(output_file), 'tensor_stats.txt')
+    with open(tensor_stats_file, 'w') as f:
+        f.write(f'level\tsize\n')
+        f.write(f'-1\t{vocab_tensors.size(0)}\n')
+
+    for level in tqdm(range(max_level+1)):
+        if len(vocab_tensors_by_level[level]) == 0:
+            continue
+        level_str = str(level).zfill(len(str(max_level)))
+        vocab_tensors = torch.stack(vocab_tensors_by_level[level])
+        order_tensors = torch.stack(order_tensors_by_level[level])
+        mask_tensors = torch.stack(mask_tensors_by_level[level])
+        fp_tensors = torch.stack(fp_tensors_by_level[level])
+
+        torch.save({
+            'vocab': vocab_tensors,
+            'order': order_tensors,
+            'mask': mask_tensors,
+            'length': max_seq_len,
+            'vocab_size': len(vocab),
+            'fingerprints': fp_tensors,
+            'fp_size': fp_tensors.size(1),
+            'max_valid_seq_len': max_valid_len_counts,
+            'max_level': level,
+        }, output_file.replace('.pt', f'_level{level_str}.pt'))
+
+        with open(tensor_stats_file, 'a') as f:
+            f.write(f'{level}\t{vocab_tensors.size(0)}\n')
 
 # print('\n'.join([f'{i}: {vocab}' for i, vocab in enumerate(vocab_list)]))
 if __name__ == '__main__':

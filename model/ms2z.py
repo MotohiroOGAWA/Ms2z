@@ -75,7 +75,7 @@ class Ms2z(nn.Module):
 
         Args:
             vocab_tensor (torch.Tensor): Vocabulary input tensor.
-            order_tensor (list of torch.Tensor): Order tensors for graph adjacency. [batch_size, seq_len, 4 (parent_idx, parent_atom_pos, atom_pos, bond_type[1~3])]
+            order_tensor (list of torch.Tensor): Order tensors for graph adjacency. [batch_size, seq_len, 5 (parent_idx, parent_atom_pos, atom_pos, bond_type[1~3], level)]
             mask_tensor (list of torch.Tensor): Mask tensors.
 
         Returns:

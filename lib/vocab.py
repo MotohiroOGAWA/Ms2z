@@ -300,12 +300,12 @@ class Vocab:
             return None
         
         vocab_tensor = torch.full((max_seq_len,), -1, dtype=torch.int64)
-        order_tensor = torch.full((max_seq_len, 4), -1, dtype=torch.int64) # (parent_idx, parent_atom_pos, atom_pos, bond_type[0~2])
+        order_tensor = torch.full((max_seq_len, 5), -1, dtype=torch.int64) # (parent_idx, parent_atom_pos, atom_pos, bond_type[0~2], level)
         mask_tensor =  torch.zeros(max_seq_len, dtype=torch.bool)  # 初期値は False
         mask_tensor[:len(vocab_tree)] = True
 
         parent_data = {}
-        parent_data[0] = (-1, -1, -1, -1)
+        parent_data[0] = [-1, -1, -1, -1, -1]
         sorting_order = [0]
         num = 0
         while num < len(vocab_tree):
@@ -323,12 +323,29 @@ class Vocab:
                 parent_atom_pos = torch.where(self.joint_potential_tensor[parent_token_idx,:,0]==parent_atom_idx)[0]
                 atom_pos = torch.where(self.joint_potential_tensor[next_token_idx,:,0]==atom_idx)[0]
                 num_bond = token_to_num_bond(next_vocab[1]) - 1
-                parent_data[sorting_order.index(next_idx)] = (sorting_order.index(parent_idx), parent_atom_pos, atom_pos, num_bond)
+                level = parent_data[parent_idx][4] + 1
+                parent_data[sorting_order.index(next_idx)] = [sorting_order.index(parent_idx), parent_atom_pos, atom_pos, num_bond, -1]
+
+        max_level = max([parent_data[i][4] for i in range(len(parent_data))])
 
         for i, vocab_i in enumerate(sorting_order):
             vocab = vocab_tree[vocab_i]
             vocab_tensor[i] = vocab['idx']
             order_tensor[i] = torch.tensor(parent_data[i], dtype=torch.int64)
+        
+        # level
+        unique_parent_indices = torch.unique(order_tensor[:, 0])
+        unique_parent_indices = unique_parent_indices[unique_parent_indices >= 0]
+        all_parent_indices = torch.arange(torch.sum(mask_tensor))
+        leave_indices = torch.tensor(np.setdiff1d(all_parent_indices.numpy(), unique_parent_indices.numpy()))
+
+        order_tensor[leave_indices, 4] = 0
+        for i in reversed(all_parent_indices):
+            parent_idx = order_tensor[i, 0]
+            parent_level = order_tensor[parent_idx, 4]
+            level = order_tensor[i, 4] + 1
+            if parent_idx >= 0:
+                order_tensor[parent_idx, 4] = max(parent_level, level)
 
         return vocab_tensor, order_tensor, mask_tensor
 
@@ -342,7 +359,7 @@ class Vocab:
         # vocab_tree を再構築
         for idx in valid_indices:
             token_idx = vocab_tensor[idx].item()
-            parent_idx, parent_atom_pos, atom_pos, bond_type_num = \
+            parent_idx, parent_atom_pos, atom_pos, bond_type_num, level = \
                 order_tensor[idx].tolist()
             if parent_atom_pos != -1:
                 parent_atom_idx = self.joint_potential_tensor[nodes[parent_idx]['idx'], parent_atom_pos, 0].item()
@@ -425,6 +442,100 @@ class Vocab:
         mol = Chem.MolFromSmiles(merged_frag.smiles)
         return mol
     
+    def tensorize_by_level(self, vocab_tensor, order_tensor, mask_tensor):
+        """
+        Create tree structures for all levels in the data.
+        Args:
+            vocab_tensor: Tensor containing vocabulary indices. Shape: [max_seq_len]
+            order_tensor: Tensor with parent-child relationship and metadata. Shape: [max_seq_len, 5]
+            mask_tensor: Tensor indicating valid entries. Shape: [max_seq_len]
+
+        Returns:
+            level_trees: A dictionary where keys are levels and values are tuples:
+                        (vocab_tensor_filtered, order_tensor_filtered, mask_tensor_filtered)
+        """
+        # Get all unique levels from order_tensor[:, 4]
+        levels = torch.arange(torch.max(order_tensor[:, 4]) + 1)
+
+        tensor_by_branch = {}
+        indices_by_level = defaultdict(list)
+        child_ids = defaultdict(list)
+
+        for i, order in enumerate(order_tensor):
+            if not mask_tensor[i]:
+                break
+            if order[0] == -1:
+                continue
+
+            child_ids[order[0].item()].append(i)
+
+        for i, order in enumerate(order_tensor):
+            indices_by_level[order[4].item()].append(i)
+
+        for i in indices_by_level[0]:
+            level = 0
+            tmp_vocab_tensor = torch.full_like(vocab_tensor, -1)
+            tmp_order_tensor = torch.full_like(order_tensor, -1) # (parent_idx, parent_atom_pos, atom_pos, bond_type[0~2], level)
+            tmp_mask_tensor = torch.zeros_like(mask_tensor)
+            tmp_vocab_tensor[0] = vocab_tensor[i]
+            tmp_order_tensor[0, 4] = level
+            tmp_mask_tensor[0] = True
+
+            tensor_by_branch[i] = {
+                'tensor': [tmp_vocab_tensor, tmp_order_tensor, tmp_mask_tensor],
+                'level': 0
+            }
+
+        for level in levels[1:]:
+            level = level.item()
+            for i in indices_by_level[level]:
+                tmp_vocab_arr = []
+                tmp_order_arr = []
+                tmp_mask_arr = []
+
+                next_indices = [i]
+                tmp_vocab_arr.append(vocab_tensor[i].item())
+                tmp_order_arr.append([-1, -1, -1, -1, level])
+                tmp_mask_arr.append(True)
+                origin_idx_to_new_idx = {i: 0}
+
+                while len(next_indices) > 0:
+                    next_idx = next_indices.pop(0)
+                    for child_idx in child_ids[next_idx]:
+                        origin_idx_to_new_idx[child_idx] = len(tmp_vocab_arr)
+                        tmp_vocab_arr.append(vocab_tensor[child_idx].item())
+                        tmp_order = [
+                            origin_idx_to_new_idx[order_tensor[child_idx, 0].item()], # parent_idx
+                            order_tensor[child_idx, 1].item(), # parent_atom_pos
+                            order_tensor[child_idx, 2].item(), # atom_pos
+                            order_tensor[child_idx, 3].item(), # bond_type
+                            order_tensor[child_idx, 4].item()
+                        ]
+                        tmp_order_arr.append(tmp_order)
+                        tmp_mask_arr.append(True)
+                        next_indices.append(child_idx)
+
+                _tmp_vocab_tensor = torch.tensor(tmp_vocab_arr, dtype=torch.int64)
+                tmp_vocab_tensor = torch.full_like(vocab_tensor, -1)
+                tmp_vocab_tensor[:len(_tmp_vocab_tensor)] = _tmp_vocab_tensor
+                _tmp_order_tensor = torch.tensor(tmp_order_arr, dtype=torch.int64)
+                tmp_order_tensor = torch.full_like(order_tensor, -1)
+                tmp_order_tensor[:len(_tmp_order_tensor)] = _tmp_order_tensor
+                _tmp_mask_tensor = torch.tensor(tmp_mask_arr, dtype=torch.bool)
+                tmp_mask_tensor = torch.zeros_like(mask_tensor)
+                tmp_mask_tensor[:len(_tmp_mask_tensor)] = _tmp_mask_tensor
+
+                tensor_by_branch[i] = {
+                    'tensor': [tmp_vocab_tensor, tmp_order_tensor, tmp_mask_tensor],
+                    'level': level
+                }
+
+        return tensor_by_branch
+
+
+
+
+
     def get_graph(self, fragment: Fragment):
             # # get the graph
             # self.vocab_idx_to_graph = {}
