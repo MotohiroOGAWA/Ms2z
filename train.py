@@ -13,6 +13,7 @@ from model.torch_utils import load_dataset, get_optimizer, get_criterion, save_d
 from model.data_pipeline import get_ds
 from model.ms2z import Ms2z
 from model.logger import TSVLogger
+from model.gradient_logger import GradientLogger
 
 def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, epochs,
          train_size, val_size, test_size,
@@ -101,6 +102,8 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
     val_loss_list = np.zeros([0])
     logger = TSVLogger(os.path.join(load_dir, 'logs.tsv')) 
+    gradient_logger = GradientLogger(os.path.join(load_dir, 'gradients.pkl'), save_interval=100)
+
 
     level = 0
     input_files_by_level = get_tensor_files(os.path.dirname(input_file))
@@ -127,14 +130,14 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
         _train_dataloader = train_dataloader_by_level[level][1]
         batch_iterator = tqdm(_train_dataloader, desc=f"Epoch(lv.{level}) {epoch+1}/{max_epoch}")
-        param_update_cnt = defaultdict(int)
+
         for batch in batch_iterator:
             token_tensor = batch['token'].to(device)
             order_tensor = batch['order'].to(device)
             mask_tensor = batch['mask'].to(device)
             fp_tensor = batch['fp'].to(device)
 
-            param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
+            # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
             token_loss, token_sim_loss, kl_divergence_loss, fp_loss, = \
                 model(token_tensor, order_tensor, mask_tensor, fp_tensor)
@@ -142,17 +145,17 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             loss = fp_loss + kl_divergence_loss
             # loss = fp_loss + token_sim_loss + kl_divergence_loss
 
+
             loss.backward()
+            gradient_logger.log(model, global_step+1, epoch+1)
             optimizer.step()
             optimizer.zero_grad()
 
-            for name, param in model.named_parameters():
-                if not torch.equal(param.data, param_backup[name]):
-                    print(f"Parameter '{name}' was updated.")
-                    param_update_cnt[name] += 1
-                else:
-                    print(f"Parameter '{name}' was NOT updated.")
-                    param_update_cnt[name] += 0
+            # for name, param in model.named_parameters():
+            #     if not torch.equal(param.data, param_backup[name]):
+            #         print(f"Parameter '{name}' was updated.")
+            #     else:
+            #         print(f"Parameter '{name}' was NOT updated.")
 
             global_step += 1
     
