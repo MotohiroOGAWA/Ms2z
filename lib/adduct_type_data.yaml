@@ -1,0 +1,45 @@
+# Mass Spectrometry Adduct Calculator
+# https://fiehnlab.ucdavis.edu/staff/kind/metabolomics/ms-adduct-calculator/
+
+"[M]+":
+  charge: 1
+  shift: 0
+  isotope: 
+
+"[M+H]+":
+  charge: 1
+  shift: 1.007276
+  isotope: H
+
+"[M+NH4]+":
+  charge: 1
+  shift: 18.033823
+  isotope: NH4
+
+"[M+Na]+":
+  charge: 1
+  shift: 22.989218
+  isotope: Na
+
+"[M+K]+":
+  charge: 1
+  shift: 38.9637064864
+  isotope: K
+
+"[M-H]-":
+  charge: -1
+  shift: -1.007276
+  isotope: H
+
+"[M+HCOO]-":
+  charge: -1
+  shift: 44.998201
+  isotope: HCOO
+
+"[M+CH3COO]-":
+  charge: -1
+  shift: 59.013851
+  isotope: CH3COO
+
+
+

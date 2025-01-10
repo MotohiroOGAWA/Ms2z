@@ -21,6 +21,8 @@ class Vocab:
     
     TOKENS = [BOS, EOS, PAD, UNK]
 
+    
+
     def __init__(self, monoatomic_tokens_path, smiles_counter_path, joint_counter_path, threshold, save_path=None):
         self.threshold = threshold
         if monoatomic_tokens_path is not None and joint_counter_path is not None:

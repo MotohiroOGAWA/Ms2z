@@ -10,6 +10,7 @@ class FragEmbeddings(nn.Module):
                  node_dim: int, edge_dim, 
                  vocab_size: int,
                  joint_potential,
+                 fp_tensor,
                  ) -> None:
         super().__init__()
         assert vocab_size == joint_potential.size(0), "vocab_size and joint mismatch"
@@ -34,6 +35,11 @@ class FragEmbeddings(nn.Module):
         # Generate one-hot vectors for bond types
         one_hot_bond_type = torch.cat([torch.eye(3), torch.zeros(1,3)], dim=0).to(torch.float32) # [4*3]
         self.bond_type = nn.Parameter(one_hot_bond_type, requires_grad=False) # [-, =, #, nan]
+
+        # fingerprint
+        self.fp_linear = nn.Linear(node_dim, fp_tensor.size(1))
+        self.fp_tensor = nn.Parameter(fp_tensor, requires_grad=False)
+        self.fp_loss_fn = nn.BCEWithLogitsLoss(reduction='none')
 
         self.criterion = nn.MSELoss()
 
@@ -78,6 +84,56 @@ class FragEmbeddings(nn.Module):
             edge_embed = self.edge_embed(token_and_joint_tensor)
         return edge_embed
     
+    def train_all(self, batch_size, shuffle=True):
+        # Get all vocab_ids
+        vocab_ids = torch.arange(self.vocab_size, device=self.embedding.weight.device)
+
+        # Shuffle vocab_ids if shuffle=True
+        if shuffle:
+            vocab_ids = vocab_ids[torch.randperm(self.vocab_size, device=vocab_ids.device)]
+
+        # Process in batches
+        for i in range(0, self.vocab_size, batch_size):
+            # Get the current batch of vocab_ids
+            batch_ids = vocab_ids[i:i+batch_size]
+            
+            # Train the model using the current batch
+            fp_loss = self.train_batch(batch_ids)
+
+            # Yield the current batch loss and associated vocab_ids
+            yield fp_loss
+    
+    def train_batch(self, vocab_ids):
+        # Get embeddings for the current batch
+        embeddings = self.embedding(vocab_ids)  # (batch_size, node_dim)
+
+        return self.calc_loss(embeddings, vocab_ids)
+    
+    def calc_loss(self, embeddings, vocab_ids):
+        # Predict fingerprints using the linear layer
+        predicted_fp = self.fp_linear(embeddings)  # (batch_size, fp_tensor.size(1))
+
+        # Get the true fingerprints for the current batch
+        true_fp = self.fp_tensor[vocab_ids]  # (batch_size, fp_tensor.size(1))
+
+        # Compute the loss for the current batch
+        element_wise_loss  = self.fp_loss_fn(predicted_fp, true_fp)
+
+        # Create masks for 0 and 1 in fp_tensor
+        zero_mask = (true_fp == 0)  # Shape: [batch_size, fp_size]
+        one_mask = (true_fp == 1)  # Shape: [batch_size, fp_size]
+
+        # Compute the mean loss for zero_mask and one_mask
+        zero_loss_mean = torch.sum(element_wise_loss * zero_mask, dim=1) / (zero_mask.sum(dim=1) + 1e-8)  # Shape: [batch_size]
+        one_loss_mean = torch.sum(element_wise_loss * one_mask, dim=1) / (one_mask.sum(dim=1) + 1e-8)    # Shape: [batch_size]
+
+        # Compute the final loss as the average of zero_loss_mean and one_loss_mean
+        fp_loss = (zero_loss_mean + one_loss_mean).mean()
+
+        # Yield the current batch loss and associated vocab_ids
+        return fp_loss
+
+
     def calc_counter_loss(self, x):
         embed = self.embedding(x)
 

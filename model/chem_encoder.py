@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .decoder import *
 from .graph_lib import *
@@ -81,7 +82,8 @@ class ChildSumTreeLSTMCell(nn.Module):
         h_sum = self.node_linear2(h_sum)
         
         # Forget gate for each child node
-        f = torch.sigmoid(self.W_f(h_sum) + self.b_f)  # Shape: (batch_size, h_size)
+        # f = torch.sigmoid(self.W_f(h_sum) + self.b_f)  # Shape: (batch_size, h_size)
+        f = F.leaky_relu(self.W_f(h_sum) + self.b_f)  # Shape: (batch_size, h_size)
         
         # Sum up forget gate-weighted cell states
         masked_c = c * mask['c'].unsqueeze(-1)
@@ -94,21 +96,98 @@ class ChildSumTreeLSTMCell(nn.Module):
         Apply LSTM cell updates for the current node.
         """
         # Input gate
-        i = torch.sigmoid(self.W_i(nodes["h_sum"]) + self.b_i)
+        # i = torch.sigmoid(self.W_i(nodes["h_sum"]) + self.b_i)
+        i = F.leaky_relu(self.W_i(nodes["h_sum"]) + self.b_i, negative_slope=0.01)
         
         # Cell candidate
-        u = torch.tanh(self.W_u(nodes["h_sum"]) + self.b_u)
+        # u = torch.tanh(self.W_u(nodes["h_sum"]) + self.b_u)
+        u = F.leaky_relu(self.W_u(nodes["h_sum"]) + self.b_u, negative_slope=0.01)
         
         # New cell state
         c = i * u + nodes["c"]  # Update cell state
         
         # Output gate
-        o = torch.sigmoid(self.W_o(nodes["h_sum"]) + self.b_o)
+        # o = torch.sigmoid(self.W_o(nodes["h_sum"]) + self.b_o)
+        o = F.leaky_relu(self.W_o(nodes["h_sum"]) + self.b_o, negative_slope=0.01)
         
         # New hidden state
-        h = o * torch.tanh(c)
+        # h = o * torch.tanh(c)
+        h = o * F.leaky_relu(c, negative_slope=0.01)
         
         return {"h": h, "c": c}
+
+
+class ChildSumTreeSimpleCell(nn.Module):
+    def __init__(self, node_dim, edge_dim, h_size):
+        super(ChildSumTreeSimpleCell, self).__init__()
+
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
+        self.h_size = h_size
+
+        # Input gate
+        self.W_i = nn.Linear(node_dim + h_size, h_size)
+        self.b_i = nn.Parameter(torch.zeros(h_size))
+
+        # Attention mechanism
+        self.attention = nn.Linear(h_size+node_dim, 1)
+
+        self.edge_linear1 = nn.Linear(h_size+node_dim+edge_dim, h_size+node_dim)
+        self.edge_linear2 = nn.Linear(h_size+node_dim, h_size+node_dim)
+
+        self.node_linear1 = nn.Linear(node_dim+h_size, node_dim+h_size)
+        self.node_linear2 = nn.Linear(node_dim+h_size, node_dim+h_size)
+
+    def message_func(self, src, dst):
+        """
+        Function to generate messages from child nodes.
+        Concatenates hidden states (h) and embeddings (embed).
+        """
+        return {
+            "h": src["h"], 
+            'embed': dst['embed'], 
+            'edge_attr': src['edge_attr'],
+            }
+
+    def reduce_func(self, mailbox, mask):
+        """
+        Function to compute aggregated results from child nodes.
+        Calculates forget gate and new cell state.
+        """
+        edge_attr = mailbox['edge_attr']
+        h = mailbox['h']
+        embed = mailbox['embed']
+
+        h2 = torch.cat([h, embed, edge_attr], dim=2)
+        h2 = self.edge_linear1(h2)
+        h2 = torch.relu(h2)
+        h2 = self.edge_linear2(h2)
+
+        # Attention weights
+        attention_scores = self.attention(h2)  # Shape: (batch_size, num_children, 1)
+        attention_scores = attention_scores.masked_fill(mask['h'].unsqueeze(-1) == False, float('-inf'))
+        attention_weights = torch.softmax(attention_scores, dim=1)
+
+        masked_h2 = self.node_linear1(h2) * mask['h'].unsqueeze(-1)
+        weighted_h2 = attention_weights * masked_h2
+
+        # Sum hidden states from children
+        h_sum = torch.sum(weighted_h2, dim=1)  # Sum over all children
+
+        h_sum = self.node_linear2(h_sum)
+        
+        return {"h_sum": h_sum}
+
+    def apply_node_func(self, nodes):
+        """
+        Apply LSTM cell updates for the current node.
+        """
+        # Input gate
+        # i = torch.sigmoid(self.W_i(nodes["h_sum"]) + self.b_i)
+        h = self.W_i(nodes["h_sum"]) + self.b_i
+        
+        return {"h": h}
+
 
 # class GATEncoder(nn.Module):
 #     def __init__(self, num_layers, embed_dim, edge_dim, num_heads, ff_dim, dropout=0.1):
@@ -144,23 +223,20 @@ class StructureEncoder(nn.Module):
         self.h_size = h_size
 
         # TreeLSTM cell
-        self.cell = ChildSumTreeLSTMCell(node_dim+edge_dim, edge_dim, h_size)
+        # self.cell = ChildSumTreeLSTMCell(node_dim+edge_dim, edge_dim, h_size)
+        self.cell = ChildSumTreeSimpleCell(node_dim+edge_dim, edge_dim, h_size)
 
         # Linear transformations
         self.dropout = nn.Dropout(dropout_rate)
-        # self.linear = nn.Linear(h_size, h_size)
-        # self.linear2 = nn.Linear(h_size, h_size)
-        # self.linear3 = nn.Linear(h_size, h_size)
-        # self.linear4 = nn.Linear(h_size, h_size)
 
         self.linear = nn.Sequential(
             nn.Linear(h_size, h_size),
             nn.ReLU(),
             nn.Linear(h_size, h_size),
-            nn.ReLU(),
-            nn.Linear(h_size, h_size),
-            nn.ReLU(),
-            nn.Linear(h_size, h_size),
+            # nn.ReLU(),
+            # nn.Linear(h_size, h_size),
+            # nn.ReLU(),
+            # nn.Linear(h_size, h_size),
         )
 
     def forward(self, node_tensor, edge_attr, adj_matrix_list, mask_tensor):

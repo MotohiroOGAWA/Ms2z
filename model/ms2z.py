@@ -21,7 +21,8 @@ class Ms2z(nn.Module):
         pad_idx = vocab_data['pad']
         unk_idx = vocab_data['unk']
         joint_potential = vocab_data['joint_potential']
-        tgt_similar = vocab_data['tgt_cosine_matrix']
+        fp_tensor = vocab_data['fingerprint']
+        # tgt_similar = vocab_data['tgt_cosine_matrix']
 
 
         self.vocab_size = vocab_size
@@ -38,12 +39,13 @@ class Ms2z(nn.Module):
             node_dim, edge_dim, 
             self.vocab_size,
             joint_potential,
+            fp_tensor,
             )
         self.bos = nn.Parameter(torch.tensor(bos_idx, dtype=torch.int32), requires_grad=False)
         self.eos = nn.Parameter(torch.tensor(eos_idx, dtype=torch.int32), requires_grad=False)
         self.pad = nn.Parameter(torch.tensor(pad_idx, dtype=torch.int32), requires_grad=False)
         self.unk = nn.Parameter(torch.tensor(unk_idx, dtype=torch.int32), requires_grad=False)
-        self.tgt_similar = nn.Parameter(tgt_similar, requires_grad=False)
+        # self.tgt_similar = nn.Parameter(tgt_similar, requires_grad=False)
 
         # Structure encoder
         encoder_h_size = 4*node_dim
@@ -59,15 +61,31 @@ class Ms2z(nn.Module):
         self.decoder_ff_dim = decoder_ff_dim
         self.decoder_dropout = decoder_dropout
         self.decoder = Decoder(decoder_layers, node_dim+edge_dim, edge_dim, decoder_heads, decoder_ff_dim, decoder_dropout)
-        self.output_word_layer = nn.Linear(node_dim+edge_dim, self.vocab_size)
+        
+        # loss_fn2 = nn.CrossEntropyLoss(ignore_index=-1)
+        # self.similar_token_loss_fn = F.binary_cross_entropy_with_logits
         # self.output_joint_layer = nn.Linear(node_dim, self.vocab_embedding.max_joint_cnt)
 
-        # Fingerprint
+        # predict Fingerprint from z
         self.fp_dim = fp_dim
-        self.fp_layer1 = nn.Linear(latent_dim, 2*fp_dim)
-        self.fp_layer2 = nn.Linear(2*fp_dim, fp_dim)
-        self.fp_dropout = nn.Dropout(0.1)
-        self.fp_loss_fn = nn.MSELoss(reduction='none')
+        self.z_fp_layer = nn.Sequential(
+            nn.Linear(latent_dim, 2*fp_dim),
+            nn.ReLU(),
+            nn.Linear(2*fp_dim, fp_dim),
+            nn.Dropout(0.1),
+        )
+        self.z_fp_loss_fn = nn.MSELoss(reduction='none')
+        
+        # predict token
+        self.output_word_layer = nn.Linear(node_dim, self.vocab_size)
+        # self.pred_token_loss_fn = nn.CrossEntropyLoss(ignore_index=self.pad, reduction='none')
+        self.pred_token_loss_fn = F.cross_entropy
+
+        # Vocab embedding loss
+        self.vocab_embed_linear = nn.Linear(node_dim, node_dim)
+
+        # self.fp_linear1 = nn.Linear(node_dim+edge_dim, 512)
+        # self.fp_linear2 = nn.Linear(512, 167)
 
     def forward(self, vocab_tensor, order_tensor, mask_tensor, fp_tensor):
         """
@@ -144,70 +162,68 @@ class Ms2z(nn.Module):
         ) # Shape: [batch_size, seq_len, node_dim]
 
         # Flatten for output layer
-        word_embeddings_flat = decoder_output.view(-1, decoder_output.size(-1)) # Shape: [batch_size*seq_len, node_dim]
-
+        output_flat = decoder_output.view(-1, decoder_output.size(-1)) # Shape: [batch_size*seq_len, node_dim+edge_dim]
         
-        tgt_flat = target_tensor.view(-1)
+        tgt_token_id_flat = target_tensor.view(-1)
         tgt_bond_pos_tensor = torch.cat([order_tensor[:,:,2], padding], dim=1)
         tgt_bond_pos_flat = tgt_bond_pos_tensor.view(-1)
-        valid_mask = tgt_flat != self.pad
+        valid_mask = tgt_token_id_flat != self.pad
 
-        word_embeddings_flat = word_embeddings_flat[valid_mask]
-        tgt_flat = tgt_flat[valid_mask]
-        tgt_similar = self.tgt_similar[tgt_flat]
-        # tgt_bond_pos_flat = tgt_bond_pos_flat[valid_mask]
+        output_flat = output_flat[valid_mask]
+        tgt_token_id_flat = tgt_token_id_flat[valid_mask]
         
-        logits_vocab = self.output_word_layer(word_embeddings_flat) # Shape: [<= batch_size*seq_len, vocab_size]
-        logits_vocab_sigmoid = torch.sigmoid(logits_vocab)
-        # logits_bond_pos = self.output_joint_layer(word_embeddings_flat) # Shape: [<= batch_size*seq_len, max_bond_cnt]
+        node_embed_flat = output_flat[:,:self.node_dim]
+        root_edge_embed_flat = output_flat[:,self.node_dim:]
+        
 
-        loss_fn1 = nn.CrossEntropyLoss(ignore_index=self.pad)
-        loss_fn2 = nn.CrossEntropyLoss(ignore_index=-1)
-        similar_token_loss_fn = F.binary_cross_entropy_with_logits
-        token_prediction_loss = loss_fn1(logits_vocab, tgt_flat)
-        token_similarity_loss = similar_token_loss_fn(logits_vocab_sigmoid, tgt_similar, reduction='none')
-        other_weight = (1 - self.tgt_token_priority_weight) / (self.vocab_size - 1)
-        token_similarity_loss_weights = torch.full_like(token_similarity_loss, other_weight)
-        token_similarity_loss_weights[torch.arange(tgt_flat.size(0)), tgt_flat] = self.tgt_token_priority_weight
-        token_similarity_loss = torch.sum(token_similarity_loss * token_similarity_loss_weights, dim=1).mean()
-        # token_similarity_loss = torch.sum(token_similarity_loss * token_similarity_loss_weights, dim=1).mean()
-        # bond_pos_prediction_loss = loss_fn2(logits_bond_pos, tgt_bond_pos_flat)
-
-        # KL Divergence loss
-        kl_divergence_loss = -0.5 * torch.sum(1 + log_var - mean.pow(2) - log_var.exp())
-        kl_divergence_loss /= mean.size(0)  # Normalize by batch size
+        if False:
+            # tgt_similar = self.tgt_similar[tgt_flat]
+            # tgt_bond_pos_flat = tgt_bond_pos_flat[valid_mask]
+            token_prediction_loss = self.pred_token_loss_fn(logits_vocab, tgt_token_id_flat)
+            token_similarity_loss = self.similar_token_loss_fn(logits_vocab_sigmoid, tgt_similar, reduction='none')
+            other_weight = (1 - self.tgt_token_priority_weight) / (self.vocab_size - 1)
+            token_similarity_loss_weights = torch.full_like(token_similarity_loss, other_weight)
+            token_similarity_loss_weights[torch.arange(tgt_token_id_flat.size(0)), tgt_token_id_flat] = self.tgt_token_priority_weight
+            token_similarity_loss = torch.sum(token_similarity_loss * token_similarity_loss_weights, dim=1).mean()
+            # token_similarity_loss = torch.sum(token_similarity_loss * token_similarity_loss_weights, dim=1).mean()
+            # bond_pos_prediction_loss = loss_fn2(logits_bond_pos, tgt_bond_pos_flat)
 
 
-        # fingerprint loss
-        fp_x = self.fp_layer1(z)
-        fp_x = torch.relu(fp_x)
-        fp_x = self.fp_layer2(fp_x)
-        fp_x = self.fp_dropout(fp_x)
-        # fp_x = torch.sigmoid(fp_x)
-        fp_x_binary = torch.where(fp_x < 0.5, torch.tensor(0.0, device=fp_x.device), torch.tensor(1.0, device=fp_x.device))
 
-        element_wise_loss  = self.fp_loss_fn(fp_x, fp_tensor)
-        fp_acc = self.fp_loss_fn(fp_x_binary, fp_tensor).mean()
+        # Fingerprint loss
+        z_fp_loss = self.calc_fp_loss(z, fp_tensor)
 
-        # Create masks for 0 and 1 in fp_tensor
-        zero_mask = (fp_tensor == 0)  # Shape: [batch_size, fp_size]
-        one_mask = (fp_tensor == 1)  # Shape: [batch_size, fp_size]
+        # KL divergence loss
+        kl_divergence_loss = self.chem_latent_sampler.calc_kl_divergence(mean, log_var)
 
-        # Compute the mean loss for zero_mask and one_mask
-        zero_loss_mean = torch.sum(element_wise_loss * zero_mask, dim=1) / (zero_mask.sum(dim=1) + 1e-8)  # Shape: [batch_size]
-        one_loss_mean = torch.sum(element_wise_loss * one_mask, dim=1) / (one_mask.sum(dim=1) + 1e-8)    # Shape: [batch_size]
+        # calc token loss
+        predict_token_loss = self.calc_predict_token_loss(node_embed_flat, tgt_token_id_flat)
 
-        # Compute the final loss as the average of zero_loss_mean and one_loss_mean
-        fp_loss = (zero_loss_mean + one_loss_mean).mean()
+        # vocab embedding loss
+        ve_loss = self.calc_node_embed_loss(node_embed_flat, tgt_token_id_flat)
 
+        # vocab embedding loss direct
+        unique_token_indices = torch.unique(tgt_token_id_flat)
+        unique_token_indices = unique_token_indices[unique_token_indices != self.eos]
+        token_loss = self.vocab_embedding.train_batch(unique_token_indices)
 
-        # counter loss
-        # vocab_idx = torch.where(mask_tensor, vocab_tensor, torch.tensor(-1, dtype=vocab_tensor.dtype))
-        # vocab_idx = vocab_idx[vocab_idx != -1].view(-1)
-        # atom_counter_loss, inner_bond_counter_loss, outer_bond_cnt_loss = self.vocab_embedding.calc_counter_loss(vocab_idx)
+        loss_list = {
+            'z_fp': z_fp_loss,
+            'KL': kl_divergence_loss,
+            'pred_token': predict_token_loss,
+            've': ve_loss,
+            'token': token_loss,
+        }
+        target_data = {
+            'z_fp': {'loss': z_fp_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.z_fp_loss_fn)},
+            'KL': {'loss': kl_divergence_loss.item(), 'accuracy': None, 'criterion': 'KL Divergence'},
+            'pred_token': {'loss': predict_token_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.pred_token_loss_fn)},
+            've': {'loss': ve_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.vocab_embedding.fp_loss_fn)},
+            'token': {'loss': token_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.vocab_embedding.fp_loss_fn)},
+        }
 
-        return token_prediction_loss, token_similarity_loss, kl_divergence_loss, fp_loss
-
+        return loss_list, target_data
+    
     def calc_chem_z(self, embed_node, edge_attr, order_tensor, mask_tensor):
         """
         Calculate the latent variable for a given input.
@@ -220,8 +236,6 @@ class Ms2z(nn.Module):
         Returns:
             z (torch.Tensor): Sampled latent variable.
         """
-
-        
         # Convert orders and masks into adjacency matrices
         adj_matrix_list = [order_to_adj_matrix(order[:, 0], mask) for order, mask in zip(order_tensor, mask_tensor)]
 
@@ -232,9 +246,63 @@ class Ms2z(nn.Module):
         z, mean, log_var = self.chem_latent_sampler(encoder_output)
 
         return z, mean, log_var
+    
+    def calc_fp_loss(self, z, fp_tensor):
+        # fingerprint loss
+        fp_x = self.z_fp_layer(z)
+        # fp_x = self.fp_dropout(fp_x)
+        fp_x_binary = torch.where(fp_x < 0.5, torch.tensor(0.0, device=fp_x.device), torch.tensor(1.0, device=fp_x.device))
 
+        # fp_x = self.vocab_embedding(target_tensor[:, 0])
+        # fp_x = self.fp_linear1(fp_x)
+        # fp_x = torch.relu(fp_x)
+        # fp_x = self.fp_linear2(fp_x)
 
+        element_wise_loss  = self.z_fp_loss_fn(fp_x, fp_tensor)
+        fp_acc = self.z_fp_loss_fn(fp_x_binary, fp_tensor).mean()
 
+        # Create masks for 0 and 1 in fp_tensor
+        zero_mask = (fp_tensor == 0)  # Shape: [batch_size, fp_size]
+        one_mask = (fp_tensor == 1)  # Shape: [batch_size, fp_size]
+
+        # Compute the mean loss for zero_mask and one_mask
+        zero_loss_mean = torch.sum(element_wise_loss * zero_mask, dim=1) / (zero_mask.sum(dim=1) + 1e-8)  # Shape: [batch_size]
+        one_loss_mean = torch.sum(element_wise_loss * one_mask, dim=1) / (one_mask.sum(dim=1) + 1e-8)    # Shape: [batch_size]
+
+        # Compute the final loss as the average of zero_loss_mean and one_loss_mean
+        fp_loss = (zero_loss_mean + one_loss_mean).mean()
+        # fp_loss = element_wise_loss.mean()
+
+        return fp_loss
+
+    def calc_predict_token_loss(self, node_embed, tgt_token_id):
+        # Project node embeddings to vocabulary logits
+        logits_vocab = self.output_word_layer(node_embed)  # Shape: [data_size, node_dim] -> [data_size, vocab_size]
+        # Apply Softmax to get probabilities
+        # probabilities = F.softmax(logits_vocab, dim=-1)  # Shape: [data_size, vocab_size]
+        
+        losses = self.pred_token_loss_fn(logits_vocab, tgt_token_id, reduction='none')
+
+        # Compute weights for each token
+        unique_tokens, counts = torch.unique(tgt_token_id, return_counts=True)
+        token_weights = (1 / counts.float()) / unique_tokens.size(0)
+
+        # Create a weight tensor for each target
+        weight_map = {token.item(): weight for token, weight in zip(unique_tokens, token_weights)}
+        weights = torch.tensor([weight_map[token.item()] for token in tgt_token_id], device=node_embed.device)  # Shape: [data_size]
+
+        # Apply weights to the individual losses
+        weighted_losses = losses * weights  # Shape: [data_size]
+
+        # Compute the weighted average loss
+        loss = weighted_losses.sum()
+
+        return loss
+
+    def calc_node_embed_loss(self, node_embed, tgt_token_id_flat):
+        node_embed = self.vocab_embed_linear(node_embed)
+        loss = self.vocab_embedding.calc_loss(node_embed, tgt_token_id_flat)
+        return loss
 
     def get_config_param(self):
         """
@@ -279,6 +347,21 @@ class Ms2z(nn.Module):
             decoder_dropout=config_param['decoder_dropout'],
             fp_dim=config_param['fp_dim'],
         )
+
+def get_criterion_name(criterion):
+    """
+    Get the name of a criterion (function or class).
+
+    Args:
+        criterion: The criterion object (function or class).
+
+    Returns:
+        str: The name of the criterion.
+    """
+    if criterion.__class__.__name__ == 'function':
+        return criterion.__name__ 
+    else:
+        return criterion.__class__.__name__ 
 
 class LatentSampler(nn.Module):
     def __init__(self, input_dim, latent_dim):
@@ -328,6 +411,39 @@ class LatentSampler(nn.Module):
         z = self.reparameterize(mean, log_var)  # Sample z using the reparameterization trick
 
         return z, mean, log_var
+    
+    def calc_kl_divergence(self, mean, log_var, target_mean=None, target_var=1.0):
+        """
+        Calculate the KL divergence with optional target mean and variance.
+
+        Args:
+            mean (torch.Tensor): Mean of the latent variable.
+            log_var (torch.Tensor): Log variance of the latent variable.
+            target_mean (float or None, optional): Target mean for the KL divergence.
+                                                If None, the mean is unrestricted. Default is None.
+            target_var (float, optional): Target variance for the KL divergence. Default is 1.0.
+
+        Returns:
+            torch.Tensor: KL divergence.
+        """
+        # Convert target variance to log variance
+        target_log_var = torch.log(torch.tensor(target_var))
+
+        if target_mean is not None:
+            # KL divergence with mean and variance restrictions
+            kl_divergence = -0.5 * torch.sum(
+                1 + log_var - target_log_var - ((mean - target_mean).pow(2) + log_var.exp()) / target_var,
+                dim=1
+            )
+        else:
+            # KL divergence with variance restriction only
+            kl_divergence = -0.5 * torch.sum(
+                1 + log_var - target_log_var - log_var.exp() / target_var,
+                dim=1
+            )
+        
+        return kl_divergence.mean()
+
 
 
 

@@ -10,7 +10,7 @@ train:
 
   optimizer:
     name: Adam
-    lr: 0.001
+    lr: 0.0001
     eps: !!float 1e-8
   # load_name: ckptest1217
   load_name: null
@@ -19,13 +19,13 @@ train:
   train_size: 0.8
   val_size: 0.1
   test_size: 0.1
-  save_epoch: 100000
+  save_epoch: 1000000
   save_iter: null
 
 model:
   node_dim: 256
   edge_dim: 8
-  latent_dim: 256
+  latent_dim: 512
   decoder_layers: 2
   decoder_heads: 4
   decoder_ff_dim: 512

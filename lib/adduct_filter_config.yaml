@@ -1,0 +1,13 @@
+ppm: 10
+# smiles_column: "SMILES"
+# aduct_type_column: "PrecursorType"
+# precursor_mz_column: "PrecursorMZ"
+adduct_types:
+  - "[M+H]+"
+  - "[M+NH4]-"
+  - "[M+Na]+"
+  - "[M+K]+"
+  
+  - "[M-H]-"
+  - "[M+HCOO]-"
+  - "[M+CH3COO]-"

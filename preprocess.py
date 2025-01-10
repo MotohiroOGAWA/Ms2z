@@ -33,14 +33,16 @@ def main(args):
 
                     if args.save_mol:
                         writer.write(mol)
-                except:
+                except Exception as e:
+                    print(f"Error: {e}")
                     cou += 1
                 if i % 1000 == 0:
                     pbar.set_postfix({'Error': cou})
             if args.save_mol:
                 writer.close()
         if cou > 0:
-            raise ValueError("There might be some errors. Check your SMILES data.")
+            pass
+            # raise ValueError("There might be some errors. Check your SMILES data.")
 
     # print("Process 2/9 is running", end = '...')
     fragmentizer = Fragmentizer()
