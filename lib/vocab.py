@@ -6,6 +6,7 @@ import torch
 
 from .utils import *
 from .calc import *
+from .calc_formula import *
 from .fragment_bond import FragmentBond, FragBondList
 from .fragment import Fragment
 from .fragment_group import FragmentGroup
@@ -20,8 +21,6 @@ class Vocab:
     UNK = '<UNK>'
     
     TOKENS = [BOS, EOS, PAD, UNK]
-
-    
 
     def __init__(self, monoatomic_tokens_path, smiles_counter_path, joint_counter_path, threshold, save_path=None):
         self.threshold = threshold
@@ -95,6 +94,15 @@ class Vocab:
             torch.diagonal(similarity_weight).fill_(1.0)
             self.tgt_cosine_matrix = self.cosine_matrix * similarity_weight
 
+            # formula tensor
+            mols = []
+            for smiles in [self[i] for i in range(len(self.TOKENS), len(self))]:
+                mol = Chem.MolFromSmiles(smiles)
+                mols.append(mol)
+            formula_tensor, symbol_to_idx = self.get_formula_tensor(mols)
+            self.formula_tensor = torch.cat([torch.zeros(len(self.TOKENS), formula_tensor.size(1), dtype=formula_tensor.dtype), formula_tensor], dim=0)
+            self.symbol_to_idx = symbol_to_idx
+
         self.fragmentizer = Fragmentizer()
 
         if save_path:
@@ -127,6 +135,8 @@ class Vocab:
             'fingerprint': self.fp_tensor,
             'cosine_matrix': self.cosine_matrix,
             'tgt_cosine_matrix': self.tgt_cosine_matrix,
+            'formula': self.formula_tensor,
+            'symbol_to_idx': self.symbol_to_idx,
             'threshold': self.threshold,
             'bos': self.bos,
             'eos': self.eos,
@@ -150,6 +160,8 @@ class Vocab:
         fingerprint_data = data['fingerprint']
         cosine_matrix_data = data['cosine_matrix']
         tgt_cosine_matrix = data['tgt_cosine_matrix']
+        formula_data = data['formula']
+        symbol_to_idx = data['symbol_to_idx']
         threshold = data['threshold']
         vocab = Vocab(None, None, None, threshold)
         vocab.idx_to_token = token_data
@@ -160,6 +172,8 @@ class Vocab:
         vocab.fp_tensor = fingerprint_data
         vocab.cosine_matrix = cosine_matrix_data
         vocab.tgt_cosine_matrix = tgt_cosine_matrix
+        vocab.formula_tensor = formula_data
+        vocab.symbol_to_idx = symbol_to_idx
         return vocab
 
     @staticmethod
@@ -539,10 +553,6 @@ class Vocab:
 
         return tensor_by_branch
 
-
-
-
-
     def get_graph(self, fragment: Fragment):
             # # get the graph
             # self.vocab_idx_to_graph = {}
@@ -571,6 +581,34 @@ class Vocab:
         edge_tensor = torch.tensor(edge_list, dtype=torch.int32)
 
         return node_tensor, edge_tensor, frag_bond_tensor
+
+    def get_formula_tensor(self, mols):
+        symbol_map = {}
+        symbol_to_idx = {}
+        cnt = 0
+        for mol in tqdm(mols, desc='MolToFormula'):
+            cnt += 1
+            formula = get_formula(mol)
+            formula_dict = formula_to_dict(formula)
+            for symbol in symbol_map.keys():
+                symbol_map[symbol].append(0.0)
+
+            for symbol in formula_dict.keys():
+                if symbol not in symbol_map:
+                    symbol_map[symbol] = [0.0] * cnt
+                    symbol_to_idx[symbol] = len(symbol_to_idx)
+                symbol_map[symbol][-1] = float(formula_dict[symbol])
+
+        formula_tensor = torch.zeros((cnt, len(symbol_to_idx)), dtype=torch.float32)
+        for symbol, values in symbol_map.items():
+            idx = symbol_to_idx[symbol]
+            formula_tensor[:, idx] = torch.tensor(values, dtype=torch.float32)
+
+        return formula_tensor, symbol_to_idx
+
+
+
+        
 
     def get_counter_tensor(self, fragment: Fragment):
         atom_counter_tensor = torch.zeros(len(self.symbol_to_idx), dtype=torch.float32)

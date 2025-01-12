@@ -8,7 +8,7 @@ from .decoder import *
 
 class Ms2z(nn.Module):
     def __init__(
-            self, vocab_data, max_seq_len, node_dim, edge_dim,
+            self, vocab_data, max_seq_len, node_dim, edge_dim, joint_edge_dim,
             latent_dim,
             decoder_layers, decoder_heads, decoder_ff_dim, decoder_dropout,
             fp_dim,
@@ -22,6 +22,7 @@ class Ms2z(nn.Module):
         unk_idx = vocab_data['unk']
         joint_potential = vocab_data['joint_potential']
         fp_tensor = vocab_data['fingerprint']
+        formula_tensor = vocab_data['formula']
         # tgt_similar = vocab_data['tgt_cosine_matrix']
 
 
@@ -36,10 +37,12 @@ class Ms2z(nn.Module):
 
         # Vocabulary embedding
         self.vocab_embedding = FragEmbeddings(
-            node_dim, edge_dim, 
+            node_dim, edge_dim, joint_edge_dim,
             self.vocab_size,
             joint_potential,
             fp_tensor,
+            formula_tensor,
+            bos_idx, eos_idx, pad_idx, unk_idx,
             )
         self.bos = nn.Parameter(torch.tensor(bos_idx, dtype=torch.int32), requires_grad=False)
         self.eos = nn.Parameter(torch.tensor(eos_idx, dtype=torch.int32), requires_grad=False)
@@ -50,6 +53,9 @@ class Ms2z(nn.Module):
         # Structure encoder
         encoder_h_size = 4*node_dim
         self.chem_encoder = StructureEncoder(node_dim=node_dim, edge_dim=edge_dim, h_size=encoder_h_size)
+
+        # MS encoder
+        self.ms_encoder = None
 
         # Latent sampler
         self.chem_latent_sampler = LatentSampler(input_dim=encoder_h_size, latent_dim=latent_dim)
@@ -149,7 +155,6 @@ class Ms2z(nn.Module):
         memory_mask = torch.zeros(memory.size(0), memory.size(1), dtype=torch.bool).to(memory.device)
         memory_mask[:, 0] = True
 
-
         # Decoder
         decoder_output = self.decoder(
             x=node_embed,
@@ -197,15 +202,17 @@ class Ms2z(nn.Module):
         kl_divergence_loss = self.chem_latent_sampler.calc_kl_divergence(mean, log_var)
 
         # calc token loss
-        predict_token_loss = self.calc_predict_token_loss(node_embed_flat, tgt_token_id_flat)
+        predict_token_loss, predict_token_acc = self.calc_predict_token_loss(node_embed_flat, tgt_token_id_flat)
 
         # vocab embedding loss
-        ve_loss = self.calc_node_embed_loss(node_embed_flat, tgt_token_id_flat)
+        ve_fp_loss, ve_formula_loss, ve_special_tokens_loss = self.calc_node_embed_loss(node_embed_flat, tgt_token_id_flat)
+        ve_loss = ve_fp_loss + ve_formula_loss + ve_special_tokens_loss
 
         # vocab embedding loss direct
         unique_token_indices = torch.unique(tgt_token_id_flat)
         unique_token_indices = unique_token_indices[unique_token_indices != self.eos]
-        token_loss = self.vocab_embedding.train_batch(unique_token_indices)
+        token_fp_loss, token_formula_loss, token_special_tokens_loss = self.vocab_embedding.train_batch_nodes(unique_token_indices)
+        token_loss = token_fp_loss + token_formula_loss + token_special_tokens_loss
 
         loss_list = {
             'z_fp': z_fp_loss,
@@ -214,15 +221,18 @@ class Ms2z(nn.Module):
             've': ve_loss,
             'token': token_loss,
         }
+        acc_list = {
+            'pred_token': predict_token_acc.item(),
+        }
         target_data = {
             'z_fp': {'loss': z_fp_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.z_fp_loss_fn)},
             'KL': {'loss': kl_divergence_loss.item(), 'accuracy': None, 'criterion': 'KL Divergence'},
-            'pred_token': {'loss': predict_token_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.pred_token_loss_fn)},
+            'pred_token': {'loss': predict_token_loss.item(), 'accuracy': predict_token_acc.item(), 'criterion': get_criterion_name(self.pred_token_loss_fn)},
             've': {'loss': ve_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.vocab_embedding.fp_loss_fn)},
             'token': {'loss': token_loss.item(), 'accuracy': None, 'criterion': get_criterion_name(self.vocab_embedding.fp_loss_fn)},
         }
 
-        return loss_list, target_data
+        return loss_list, acc_list, target_data
     
     def calc_chem_z(self, embed_node, edge_attr, order_tensor, mask_tensor):
         """
@@ -297,12 +307,17 @@ class Ms2z(nn.Module):
         # Compute the weighted average loss
         loss = weighted_losses.sum()
 
-        return loss
+        # Compute the accuracy
+        predicted_token_id = torch.argmax(logits_vocab, dim=1)
+        correct = (predicted_token_id == tgt_token_id).float()
+        accuracy = correct.mean()
+        # tgt_token_id[torch.where(correct >= 1.0)[0]]
+
+        return loss, accuracy
 
     def calc_node_embed_loss(self, node_embed, tgt_token_id_flat):
         node_embed = self.vocab_embed_linear(node_embed)
-        loss = self.vocab_embedding.calc_loss(node_embed, tgt_token_id_flat)
-        return loss
+        return self.vocab_embedding.calc_node_loss(node_embed, tgt_token_id_flat)
 
     def get_config_param(self):
         """
@@ -312,7 +327,6 @@ class Ms2z(nn.Module):
             dict: Model configuration.
         """
         return {
-            'vocab_data': self.vocab.get_data_to_save(),
             'max_seq_len': self.max_seq_len,
             'node_dim': self.node_dim,
             'edge_dim': self.edge_dim,

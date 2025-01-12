@@ -33,22 +33,38 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     if not os.path.exists(load_dir):
         os.makedirs(load_dir)
 
+    
+    input_file = files['tree']
+
     # Load the model and optimizer if load_epoch > 0
     if load_epoch is not None and (load_epoch > 0 or load_epoch == -1):
-        dataset, train_dataloader, val_dataloader, _ = \
-            load_dataset(load_dir, batch_size=batch_size, name=None, load_dataset=True, load_train_loader=True, load_val_dataloader=True, load_test_dataloader=False)
-    
+        print(f"Loading model from {load_dir}, epoch: {load_epoch}, iter: {load_iter}")
+
+        dataset, train_dataloader, val_dataloader, test_dataloader, ds_extra_data = \
+            load_dataset(
+                load_dir, batch_size=batch_size, name=None, 
+                load_dataset=True, load_train_loader=True, 
+                load_val_dataloader=True, load_test_dataloader=False,
+                extra_data_keys=['vocab']
+                )
+
+        vocab_data = ds_extra_data['vocab']
         create_model_from_config = Ms2z.from_config_param
 
         model, load_epoch, global_step, optimizer, optimizer_info = \
-            load_model(create_model_from_config, load_dir, load_epoch, load_iter, device)
+            load_model(
+                create_model_from_config, load_dir, load_epoch, load_iter, device,
+                extra_config_data={'vocab_data': vocab_data}
+                )
         
         initial_epoch = load_epoch
         max_epoch = epochs + load_epoch
+        token_pre_train_epoch = 0
 
     # Create a new model if load_epoch = 0
     else:
-        input_file = files['tree']
+        vocab_file = files['vocab_file']
+        vocab_data =  dill.load(open(vocab_file, 'rb'))
 
         token_tensor, order_tensor, mask_tensor, max_seq_len, \
             vocab_size, fingerprint_tensor, fp_dim = read_tensor_file(input_file)
@@ -59,24 +75,24 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
             'mask': mask_tensor,
             'fp': fingerprint_tensor
         }
+        ds_extra_data = {
+            'vocab': vocab_data
+        }
         dataset, train_dataloader, val_dataloader, test_dataloader \
               = get_ds(variables, mode='train', batch_size=batch_size, 
                         train_size=train_size, val_size=val_size, test_size=test_size,
                        device=torch.device('cpu'))
         # if dataset_save_dir == '':
         #     dataset_save_dir = os.path.join(load_dir, 'ds')
-        save_dataset(load_dir, dataset, train_dataloader, val_dataloader, test_dataloader)
-        train_dataloader_by_level = {}
-        train_dataloader_by_level[-1] = [dataset, train_dataloader, val_dataloader, test_dataloader]
+        save_dataset(load_dir, dataset, train_dataloader, val_dataloader, test_dataloader, extra_data=ds_extra_data)
 
         load_epoch = 0
         load_path = None
         initial_epoch = 0
         max_epoch = epochs
         global_step = 0
+        token_pre_train_epoch = 500
 
-        vocab_file = files['vocab_file']
-        vocab_data =  dill.load(open(vocab_file, 'rb'))
         model = Ms2z(
             vocab_data=vocab_data,
             max_seq_len=max_seq_len,
@@ -94,7 +110,8 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         optimizer = get_optimizer(model, optimizer_info)
 
     # define loss function (criterion)
-    # criterion = get_criterion(criterion_name)
+    train_dataloader_by_level = {}
+    train_dataloader_by_level[-1] = [dataset, train_dataloader, val_dataloader, test_dataloader]
 
 
     print(f"train size: {len(train_dataloader.dataset)}, val size: {len(val_dataloader.dataset)}")  
@@ -107,15 +124,16 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
     # train embedding
     print(f"Vocab size: {model.vocab_size}")
-    with tqdm(range(500), desc="Training Embedding") as pbar:
+    with tqdm(range(token_pre_train_epoch), desc="Training Embedding") as pbar:
         for epoch in pbar:
-            for loss in model.vocab_embedding.train_all(batch_size):
+            for fp_loss, formula_loss, special_tokens_loss in model.vocab_embedding.train_all_nodes(batch_size):
+                loss = fp_loss + formula_loss + special_tokens_loss
                 loss.backward()  # 勾配計算
                 optimizer.step()  # パラメータ更新
                 optimizer.zero_grad()  # 勾配初期化
                 
                 # tqdm の進捗バーにロスを表示
-                pbar.set_postfix({"loss": loss.item()})
+                pbar.set_postfix({"loss": f"{loss.item():6.3f}", "fp_loss": f"{fp_loss.item():6.3f}", "formula_loss": f"{formula_loss.item():6.3f}", "special_tokens_loss": f"{special_tokens_loss.item():6.3f}"})
 
 
     level = 0
@@ -123,11 +141,11 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     start_time = time.time()
     for epoch in range(initial_epoch, max_epoch):
         model.train()
-        # if (epoch+1) % 10 == 0:
-        #     level += 1
-
-        #     if level > 8:
-        #         level = -1
+        if epoch < 50 * 8:
+            if (epoch+1) % 50 == 0:
+                level += 1
+        else:
+            level = -1
         if level not in train_dataloader_by_level:
             token_tensor, order_tensor, mask_tensor, max_seq_len, \
                 vocab_size, fingerprint_tensor, fp_dim = read_tensor_file(input_files_by_level[level])
@@ -146,8 +164,9 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                        device=torch.device('cpu'))
             train_dataloader_by_level[level] = [_dataset, _train_dataloader, _val_dataloader, _test_dataloader]
 
-        _train_dataloader = train_dataloader_by_level[level][1]
-        batch_iterator = tqdm(_train_dataloader, desc=f"Epoch(lv.{level}) {epoch+1}/{max_epoch}")
+        train_dataloader = train_dataloader_by_level[level][1]
+        val_dataloader = train_dataloader_by_level[level][2]
+        batch_iterator = tqdm(train_dataloader, desc=f"Epoch(lv.{level}) {epoch+1}/{max_epoch}")
 
         for batch in batch_iterator:
             token_tensor = batch['token'].to(device)
@@ -157,7 +176,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
             # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-            loss_list, target_data = \
+            loss_list, acc_list, target_data = \
                 model(token_tensor, order_tensor, mask_tensor, fp_tensor)
             loss = calc_loss(loss_list)
 
@@ -179,6 +198,11 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
             loss_items = {key: f"{value.item():6.3f}" for key, value in loss_list.items()}
             loss_items['loss'] = f"{loss.item():6.3f}"
+            for loss_key, acc in acc_list.items():
+                if loss_key in loss_items:
+                    loss_items[loss_key] = f'{loss_items[loss_key]}({acc:.3f})'
+                else:
+                    loss_items[loss_key] = f'({acc:.3f})'
             batch_iterator.set_postfix(loss_items)
 
             current_time = time.time() - start_time
@@ -199,7 +223,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
                 print(f"Model and optimizer saved at {save_path}")
                 
         # Validation
-        val_loss, val_target_data = run_validation(model, _val_dataloader, logger, global_step, epoch+1, optimizer=optimizer, timestamp=current_time, extra_columns={'level': level})
+        val_loss, val_target_data = run_validation(model, val_dataloader, logger, global_step, epoch+1, optimizer=optimizer, timestamp=current_time, extra_columns={'level': level})
         val_loss_list = np.append(val_loss_list, val_loss)
         val_loss_items = loss_items = {key: f"{value['loss']:6.3f}" for key, value in val_target_data.items()}
         print(f"Validation Loss after epoch {epoch+1}: {val_loss_items} {val_loss}")
@@ -233,7 +257,7 @@ def run_validation(model, val_dataloader, logger, global_step, epoch, optimizer,
 
             # param_backup = {name: param.clone().detach() for name, param in model.named_parameters()}
 
-            loss_list, target_data = \
+            loss_list, acc_list, target_data = \
                 model(token_tensor, order_tensor, mask_tensor, fp_tensor)
             loss = calc_loss(loss_list)
 
@@ -258,7 +282,7 @@ def run_validation(model, val_dataloader, logger, global_step, epoch, optimizer,
     
     logger.log(
         "validation", 
-        epoch=epoch+1, global_step=global_step,
+        epoch=epoch, global_step=global_step,
         data_size=token_tensor.shape[0], target_data=target_data,
         learning_rate=optimizer.param_groups[0]['lr'],
         timestamp=timestamp,

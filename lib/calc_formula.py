@@ -353,6 +353,16 @@ def smiles_with_atom_indices(mol: Chem.Mol) -> str:
     
     return smiles_with_idx
 
+def get_formula(mol: Chem.Mol) -> str:
+    """
+    Generate the molecular formula for a given RDKit molecule.
+    
+    :param mol: RDKit Mol object representing the molecule.
+    :return: Molecular formula string.
+    """
+    formula = Chem.rdMolDescriptors.CalcMolFormula(mol)
+    return formula
+
 def formula_to_dict(formula):
     """
     Converts a chemical formula in string format into a dictionary with element symbols as keys
@@ -522,8 +532,6 @@ def calc_hydrogen_for_each_unsaturation(element_counts, min_unsaturation, max_un
             break
     
     return results
-
-
 
 
 # Function to fragment the molecule and retrieve SMILES and exact masses for each fragment

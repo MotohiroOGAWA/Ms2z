@@ -7,13 +7,18 @@ import math
 
 class FragEmbeddings(nn.Module):
     def __init__(self, 
-                 node_dim: int, edge_dim, 
+                 node_dim: int, edge_dim: int, joint_edge_dim: int,
                  vocab_size: int,
                  joint_potential,
                  fp_tensor,
+                 formula_tensor, 
+                 bos, eos, pad, unk,
                  ) -> None:
         super().__init__()
         assert vocab_size == joint_potential.size(0), "vocab_size and joint mismatch"
+        assert vocab_size == fp_tensor.size(0), "vocab_size and fp mismatch"
+        assert vocab_size == formula_tensor.size(0), "vocab_size and formula mismatch"
+        assert edge_dim > 3, "edge_dim must be greater than 3"
 
         self.embed_dim = node_dim
         self.edge_dim = edge_dim
@@ -37,9 +42,32 @@ class FragEmbeddings(nn.Module):
         self.bond_type = nn.Parameter(one_hot_bond_type, requires_grad=False) # [-, =, #, nan]
 
         # fingerprint
-        self.fp_linear = nn.Linear(node_dim, fp_tensor.size(1))
+        self.fp_linear = nn.Sequential(
+            nn.Linear(node_dim, node_dim),
+            nn.ReLU(),
+            nn.Linear(node_dim, fp_tensor.size(1))
+        )
         self.fp_tensor = nn.Parameter(fp_tensor, requires_grad=False)
         self.fp_loss_fn = nn.BCEWithLogitsLoss(reduction='none')
+
+        # formula
+        self.formula_linear = nn.Sequential(
+            nn.Linear(node_dim, node_dim),
+            nn.ReLU(),
+            nn.Linear(node_dim, formula_tensor.size(1))
+        )
+        self.formula_tensor = nn.Parameter(formula_tensor, requires_grad=False)
+        self.formula_loss_fn = F.smooth_l1_loss
+
+        # bos, eos, pad, unk
+        self.special_tokens_tensor = nn.Parameter(torch.zeros(vocab_size, dtype=torch.long), requires_grad=False)
+        self.special_tokens_tensor[bos] = 1
+        self.special_tokens_tensor[eos] = 2
+        self.special_tokens_tensor[pad] = 3
+        self.special_tokens_tensor[unk] = 4
+        self.special_tokens_linear = nn.Linear(node_dim, 5)
+        self.special_tokens_loss_fn = F.cross_entropy
+
 
         self.criterion = nn.MSELoss()
 
@@ -84,7 +112,7 @@ class FragEmbeddings(nn.Module):
             edge_embed = self.edge_embed(token_and_joint_tensor)
         return edge_embed
     
-    def train_all(self, batch_size, shuffle=True):
+    def train_all_nodes(self, batch_size, shuffle=True):
         # Get all vocab_ids
         vocab_ids = torch.arange(self.vocab_size, device=self.embedding.weight.device)
 
@@ -98,18 +126,26 @@ class FragEmbeddings(nn.Module):
             batch_ids = vocab_ids[i:i+batch_size]
             
             # Train the model using the current batch
-            fp_loss = self.train_batch(batch_ids)
+            fp_loss, formula_loss, special_tokens_loss = self.train_batch_nodes(batch_ids)
 
             # Yield the current batch loss and associated vocab_ids
-            yield fp_loss
+            yield fp_loss, formula_loss, special_tokens_loss
     
-    def train_batch(self, vocab_ids):
+    def train_batch_nodes(self, vocab_ids):
         # Get embeddings for the current batch
         embeddings = self.embedding(vocab_ids)  # (batch_size, node_dim)
 
-        return self.calc_loss(embeddings, vocab_ids)
+        return self.calc_node_loss(embeddings, vocab_ids)
+        
+
+    def calc_node_loss(self, embeddings, vocab_ids):
+        fp_loss = self.calc_fp_loss(embeddings, vocab_ids)
+        formula_loss = self.calc_formula_loss(embeddings, vocab_ids)
+        special_tokens_loss = self.calc_special_tokens_loss(embeddings, vocab_ids)
+
+        return fp_loss, formula_loss, special_tokens_loss
     
-    def calc_loss(self, embeddings, vocab_ids):
+    def calc_fp_loss(self, embeddings, vocab_ids):
         # Predict fingerprints using the linear layer
         predicted_fp = self.fp_linear(embeddings)  # (batch_size, fp_tensor.size(1))
 
@@ -132,6 +168,37 @@ class FragEmbeddings(nn.Module):
 
         # Yield the current batch loss and associated vocab_ids
         return fp_loss
+    
+    def calc_formula_loss(self, embeddings, vocab_ids):
+        # Predict formula using the linear layer
+        predicted_formula = self.formula_linear(embeddings)  # (batch_size, formula_tensor.size(1))
+
+        # Get the true formula for the current batch
+        true_formula = self.formula_tensor[vocab_ids]  # (batch_size, formula_tensor.size(1))
+
+        # Compute the loss for the current batch
+        formula_loss = self.formula_loss_fn(predicted_formula, true_formula)
+
+        return formula_loss
+    
+    def calc_special_tokens_loss(self, embeddings, vocab_ids):
+        # Predict special tokens using the linear layer
+        predicted_special_tokens = self.special_tokens_linear(embeddings)  # (batch_size, 5)
+        
+        # Get the true special tokens for the current batch
+        true_special_tokens = self.special_tokens_tensor[vocab_ids]
+
+
+        unique_sp_tokens, counts = torch.unique(true_special_tokens, return_counts=True)
+        token_weights = (1 / counts.float()) / unique_sp_tokens.size(0)
+        weight_map = {token.item(): weight for token, weight in zip(unique_sp_tokens, token_weights)}
+        weights = torch.tensor([weight_map[token.item()] for token in true_special_tokens], device=true_special_tokens.device)  # Shape: [data_size]
+
+        # Compute the loss for the current batch
+        special_tokens_loss = self.special_tokens_loss_fn(predicted_special_tokens, true_special_tokens, reduction='none')
+        special_tokens_loss = (special_tokens_loss * weights).sum()
+
+        return special_tokens_loss
 
 
     def calc_counter_loss(self, x):

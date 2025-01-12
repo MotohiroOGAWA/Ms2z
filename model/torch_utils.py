@@ -84,7 +84,7 @@ def save_model(model, epoch, global_step, save_dir, optimizer = None, optimizer_
     }, save_path)
     return save_path
 
-def load_model(func_create_model_form_config, load_dir, load_epoch, load_iter=None, device=None):
+def load_model(func_create_model_form_config, load_dir, load_epoch, load_iter=None, device=None, extra_config_data=None):
     # Load the model and optimizer from the specified load_dir
     dirname = os.path.join(load_dir, 'ckpt')
     latent_iter = -1
@@ -117,7 +117,10 @@ def load_model(func_create_model_form_config, load_dir, load_epoch, load_iter=No
     load_path = os.path.join(dirname, selected_file)
 
     checkpoint = torch.load(load_path)
-    model = func_create_model_form_config(checkpoint['model_config'])
+    model_config = checkpoint['model_config']
+    if extra_config_data is not None:
+        model_config.update(extra_config_data)
+    model = func_create_model_form_config(model_config)
     model.load_state_dict(checkpoint['model_state_dict'])
 
     if device is not None:
@@ -131,7 +134,7 @@ def load_model(func_create_model_form_config, load_dir, load_epoch, load_iter=No
     return model, epoch, global_step, optimizer, optimizer_info
 
 def save_dataset(
-        save_dir, dataset, train_loader, val_dataloader, test_dataloader, name=None):
+        save_dir, dataset, train_loader, val_dataloader, test_dataloader, extra_data:dict=None, name=None):
     # Save the dataset to the specified save_dir
     if name is None:
         name = ''
@@ -144,9 +147,12 @@ def save_dataset(
     dill.dump(train_loader, open(os.path.join(save_dir, name + 'train_loader.pkl'), 'wb'))
     dill.dump(val_dataloader, open(os.path.join(save_dir, name + 'val_loader.pkl'), 'wb'))
     dill.dump(test_dataloader, open(os.path.join(save_dir, name + 'test_loader.pkl'), 'wb'))
+    if extra_data is not None:
+        for key, value in extra_data.items():
+            dill.dump(value, open(os.path.join(save_dir, name + key + '.pkl'), 'wb'))
 
 
-def load_dataset(load_dir, batch_size=None, name=None, load_dataset=True, load_train_loader=True, load_val_dataloader=True, load_test_dataloader=True):
+def load_dataset(load_dir, batch_size=None, name=None, load_dataset=True, load_train_loader=True, load_val_dataloader=True, load_test_dataloader=True, extra_data_keys:list[str]=None):
     load_dir = os.path.join(load_dir, "ds")
 
     # Load the dataset from the specified save_dir
@@ -180,5 +186,10 @@ def load_dataset(load_dir, batch_size=None, name=None, load_dataset=True, load_t
     else:
         test_dataloader = None
 
+    extra_data = {}
+    if extra_data_keys is not None:
+        for key in extra_data_keys:
+            extra_data[key] = dill.load(open(os.path.join(load_dir, name + key + '.pkl'), 'rb'))
 
-    return dataset, train_loader, val_dataloader, test_dataloader
+
+    return dataset, train_loader, val_dataloader, test_dataloader, extra_data

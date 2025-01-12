@@ -21,6 +21,11 @@ class TSVLogger:
         
         self.log_file_path = log_file_path
         self.extra_columns = extra_columns if extra_columns else []
+        
+        # Internal cache for wide format data
+        self._wide_format_cache = None
+        self._last_processed_row = -1  # Tracks the last processed row
+        self._total_rows = 0  # Cached total rows count
 
         # Check if the log file exists, if not, create it and write the header
         if not os.path.exists(self.log_file_path):
@@ -97,6 +102,8 @@ class TSVLogger:
             writer = csv.DictWriter(file, delimiter='\t', fieldnames=self.header)
             writer.writerow(row)
 
+        self._total_rows += 1
+
     @staticmethod
     def load(file_path):
         """
@@ -113,53 +120,76 @@ class TSVLogger:
 
     def _load_log(self):
         """
-        Load the TSV log file into a pandas DataFrame.
-        
+        Load the TSV log file into a pandas DataFrame if necessary.
+
         Returns:
-            pd.DataFrame: Data from the TSV log file.
+            pd.DataFrame: The data from the log file.
         """
-        return pd.read_csv(self.log_file_path, delimiter='\t')
+        if self._total_rows > self._last_processed_row:
+            # Load only if new rows exist
+            data = pd.read_csv(self.log_file_path, delimiter='\t')
+            self._last_processed_row = len(data)
+            return data
+        else:
+            # No new rows, return None or empty DataFrame
+            return None
     
     def to_wide_format(self):
         """
-        Transform the TSV data into a wide format where each target has its own columns,
-        separated by `type` (e.g., 'train', 'validation').
+        Convert the TSV data to wide format with caching.
 
         Returns:
-            dict: A dictionary where keys are `type` values (e.g., 'train', 'validation'),
-                and values are transformed DataFrames with target-specific columns.
+            dict: A dictionary with log types (e.g., 'train', 'validation') as keys
+                  and corresponding DataFrames in wide format as values.
         """
-        # Load log data
-        data = self._load_log()
+        # Load data only if there are new rows
+        new_data = self._load_log()
 
-        # Ensure target data columns are properly converted from string to list
+        if new_data is not None:
+            if self._wide_format_cache is not None:
+                # Update cache with new data
+                new_wide_format = self._process_to_wide_format(new_data)
+                for log_type, df in new_wide_format.items():
+                    if log_type in self._wide_format_cache:
+                        self._wide_format_cache[log_type] = pd.concat(
+                            [self._wide_format_cache[log_type], df], ignore_index=True
+                        )
+                    else:
+                        self._wide_format_cache[log_type] = df
+            else:
+                # First-time processing
+                self._wide_format_cache = self._process_to_wide_format(new_data)
+
+        return self._wide_format_cache
+    
+    def _process_to_wide_format(self, data):
+        """
+        Process the given data to wide format.
+
+        Args:
+            data (pd.DataFrame): DataFrame to process.
+
+        Returns:
+            dict: Wide format DataFrames by type.
+        """
         data['target_name'] = data['target_name'].apply(lambda x: x.split(','))
         data['loss'] = data['loss'].apply(lambda x: list(map(float, x.split(','))))
         data['accuracy'] = data['accuracy'].apply(
-            lambda x: [
-                float(val) if val not in ['N/A', 'None'] else None
-                for val in x.split(',')
-            ]
+            lambda x: [float(val) if val not in ['N/A', 'None'] else None for val in x.split(',')]
         )
         data['criterion'] = data['criterion'].apply(lambda x: x.split(','))
 
-        # Extract unique target names
         unique_target_names = list(set(
             target for target_g in data['target_name'] for target in target_g
         ))
 
-        # Group data by `type`
         grouped_data = {}
         for log_type, group in data.groupby('type'):
-            # Initialize transformed DataFrame for this `type`
             transformed_data = group[['global_step', 'epoch', 'data_size', 'timestamp', 'learning_rate']].copy()
-
-            # Add columns for each target's metrics
             for target in unique_target_names:
                 transformed_data[f"{target}_loss"] = None
                 transformed_data[f"{target}_accuracy"] = None
 
-            # Populate the transformed DataFrame
             for i, row in group.iterrows():
                 for target, loss, accuracy in zip(row['target_name'], row['loss'], row['accuracy']):
                     transformed_data.loc[i, f"{target}_loss"] = loss
@@ -169,9 +199,9 @@ class TSVLogger:
 
         return grouped_data
 
-    def plot_loss(self, target_names=None, save_dir_name=None, xlim=None, ylim=None, legend_fontsize=10):
+    def plot_loss_by_target(self, target_names=None, save_dir_name=None, xlim=None, ylim=None, legend_fontsize=10, separate_loss_and_accuracy=True):
         """
-        Plot losses for specified target_names. If target_names is None, plot all targets individually.
+        Plot losses and accuracies for specified target_names. Optionally, separate or combine loss and accuracy.
 
         Args:
             target_names (list or None): List of target names or grouped target names (e.g., "targetA,targetB").
@@ -180,50 +210,122 @@ class TSVLogger:
             xlim (tuple): Tuple (xmin, xmax) for limiting the x-axis range (epochs).
             ylim (tuple): Tuple (ymin, ymax) for limiting the y-axis range (loss values).
             legend_fontsize (int, optional): Font size for the legend.
+            separate_loss_and_accuracy (bool, optional): If True, plot loss and accuracy in separate plots. If False, combine them.
+                                        Default is True.
         """
         # Convert the data to wide format
         wide_data_by_type = self.to_wide_format()
-        type_names = list(wide_data_by_type.keys())
 
-        # Extract all unique targets if target_names is None
+        # Automatically extract all unique targets if target_names is None
         if target_names is None:
-            target_names = set(col[:-len('_loss')] for col in wide_data_by_type[type_names[0]].columns if col.endswith('_loss'))
+            type_names = list(wide_data_by_type.keys())
+            target_names = set(
+                col[:-len('_loss')] for col in wide_data_by_type[type_names[0]].columns if col.endswith('_loss')
+            )
 
-        # Process each specified target or grouped targets
+        # Process each specified target name or grouped targets
         for target_group in target_names:
-            # Handle grouped targets
             targets = target_group.split(',')
 
-            for type_name, wide_data in wide_data_by_type.items():
-                plt.figure(figsize=(10, 6))
+            if separate_loss_and_accuracy:
+                # Plot losses and accuracies in separate plots
                 for target in targets:
-                    loss_col = f"{target}_loss"
+                    plt.figure(figsize=(12, 8))
+                    flag = False
 
-                    if loss_col not in wide_data:
-                        print(f"Warning: No data found for target '{target}'. Skipping.")
-                        continue
+                    for type_name, wide_data in wide_data_by_type.items():
+                        loss_col = f"{target}_loss"
 
-                    # Plot the losses
-                    plt.plot(wide_data['global_step'], wide_data[loss_col], label=f"{target} Loss")
+                        if loss_col in wide_data:
+                            flag = True
+                            plt.plot(wide_data['global_step'], wide_data[loss_col],
+                                    label=f"{type_name} Loss ({target})", linestyle='-')
 
-                # Add plot details
-                plt.title(f"{type_name} Loss for {' & '.join(targets)}")
+                    plt.title(f"Loss for {target}")
+                    plt.xlabel('Global Step')
+                    plt.ylabel('Loss Value')
+                    plt.legend(fontsize=legend_fontsize)
+                    plt.grid(True)
+
+                    if xlim:
+                        plt.xlim(xlim)
+                    if ylim:
+                        plt.ylim(ylim)
+
+                    if flag:
+                        if save_dir_name:
+                            save_dir = os.path.join(os.path.dirname(self.log_file_path), save_dir_name)
+                            os.makedirs(save_dir, exist_ok=True)
+                            plt.savefig(f"{save_dir}/{target}_loss_plot.png")
+                        else:
+                            plt.show()
+
+                    plt.close()
+
+                    # Plot accuracy
+                    plt.figure(figsize=(12, 8))
+                    flag = False
+
+                    for type_name, wide_data in wide_data_by_type.items():
+                        accuracy_col = f"{target}_accuracy"
+
+                        if accuracy_col in wide_data and wide_data[accuracy_col].notna().any():
+                            flag = True
+                            plt.plot(wide_data['global_step'], wide_data[accuracy_col],
+                                    label=f"{type_name} Accuracy ({target})", linestyle='-')
+
+                    plt.title(f"Accuracy for {target}")
+                    plt.xlabel('Global Step')
+                    plt.ylabel('Accuracy Value')
+                    plt.legend(fontsize=legend_fontsize)
+                    plt.grid(True)
+
+                    if xlim:
+                        plt.xlim(xlim)
+                    if ylim:
+                        plt.ylim(ylim)
+
+                    if flag:
+                        if save_dir_name:
+                            plt.savefig(f"{save_dir}/{target}_accuracy_plot.png")
+                        else:
+                            plt.show()
+
+                    plt.close()
+
+            else:
+                # Combine loss and accuracy in the same plot
+                plt.figure(figsize=(12, 8))
+
+                for target in targets:
+                    for type_name, wide_data in wide_data_by_type.items():
+                        loss_col = f"{target}_loss"
+                        accuracy_col = f"{target}_accuracy"
+
+                        if loss_col in wide_data:
+                            plt.plot(wide_data['global_step'], wide_data[loss_col],
+                                    label=f"{type_name} Loss ({target})", linestyle='-')
+
+                        if accuracy_col in wide_data and wide_data[accuracy_col].notna().any():
+                            plt.plot(wide_data['global_step'], wide_data[accuracy_col],
+                                    label=f"{type_name} Accuracy ({target})", linestyle='--')
+
+                plt.title(f"Metrics for {' & '.join(targets)}")
                 plt.xlabel('Global Step')
-                plt.ylabel('Loss Value')
+                plt.ylabel('Value')
                 plt.legend(fontsize=legend_fontsize)
                 plt.grid(True)
 
-                # Set x and y axis limits if provided
                 if xlim:
                     plt.xlim(xlim)
                 if ylim:
                     plt.ylim(ylim)
 
-                # Save or show the plot
                 if save_dir_name:
                     save_dir = os.path.join(os.path.dirname(self.log_file_path), save_dir_name)
                     os.makedirs(save_dir, exist_ok=True)
-                    plt.savefig(f"{save_dir}/{'_'.join(targets)}_loss_plot.png")
+                    plt.savefig(f"{save_dir}/{'_'.join(targets)}_metrics_plot.png")
                 else:
                     plt.show()
-            plt.close()
+
+                plt.close()
