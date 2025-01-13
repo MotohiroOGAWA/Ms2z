@@ -31,6 +31,7 @@ def process_smiles_batch(smiles_batch, vocab_file, max_seq_len):
             'mask': [],
             'fingerprints': [],
             'fp_size': -1,
+            'smiles': [],
             }
         }
     }
@@ -42,11 +43,13 @@ def process_smiles_batch(smiles_batch, vocab_file, max_seq_len):
     order_tensors = []
     mask_tensors = []
     fp_tensors = []
+    smiles_list = []
 
     vocab_tensors_by_level = defaultdict(list)
     order_tensors_by_level = defaultdict(list)
     mask_tensors_by_level = defaultdict(list)
     fp_tensors_by_level = defaultdict(list)
+    smiles_list_by_level = defaultdict(list)
     tree_str_by_level = defaultdict(list)
 
     for smiles in smiles_batch:
@@ -77,6 +80,7 @@ def process_smiles_batch(smiles_batch, vocab_file, max_seq_len):
             order_tensors.append(order_tensor)
             mask_tensors.append(mask_tensor)
             fp_tensors.append(fp_tensor)
+            smiles_list.append(input_smiles)
 
             success_cnt += 1
 
@@ -100,6 +104,7 @@ def process_smiles_batch(smiles_batch, vocab_file, max_seq_len):
                             order_tensors_by_level[level].append(level_order)
                             mask_tensors_by_level[level].append(level_mask)
                             fp_tensors_by_level[level].append(fp_tensor_level)
+                            smiles_list_by_level[level].append(output_smiles)
                             tree_str_by_level[level].append(tree_str)
                     except Exception as e:
                         pass
@@ -130,6 +135,7 @@ def process_smiles_batch(smiles_batch, vocab_file, max_seq_len):
         'mask': mask_tensors,
         'fingerprints': fp_tensors,
         'fp_size': fp_tensors.size(1),
+        'smiles': smiles_list,
         'tree_str': [],
     }
 
@@ -147,6 +153,7 @@ def process_smiles_batch(smiles_batch, vocab_file, max_seq_len):
             'mask': mask_tensors,
             'fingerprints': fp_tensors,
             'fp_size': fp_tensors.size(1),
+            'smiles': smiles_list_by_level[level],
             'tree_str': tree_str_by_level[level],
         }
 
@@ -210,6 +217,7 @@ def main(
                         'order': [],
                         'mask': [],
                         'fp': [],
+                        'smiles': [],
                     }
                 
                 tree_str_by_level[level].extend(data['tree_str'])
@@ -217,6 +225,7 @@ def main(
                 results[level]['order'].append(data['order'])
                 results[level]['mask'].append(data['mask'])
                 results[level]['fp'].append(data['fingerprints'])
+                results[level]['smiles'].extend(data['smiles'])
             failed_smiles_list.extend(batch_result['failed_smiles'])
             pbar.update(batch_result['total_cnt'])
             pbar.set_postfix_str(f'Success: {success_cnt}/{total_cnt} ({success_cnt/total_cnt:.2%})')
@@ -241,6 +250,7 @@ def main(
             results[level]['order'] = torch.cat(data['order'], dim=0)[valid_indices]
             results[level]['mask'] = torch.cat(data['mask'], dim=0)[valid_indices]
             results[level]['fp'] = torch.cat(data['fp'], dim=0)[valid_indices]
+            results[level]['smiles'] = [data['smiles'][i] for i in valid_indices]
 
     # Save results
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -256,11 +266,14 @@ def main(
         order_tensors = results[level]['order']
         mask_tensors = results[level]['mask']
         fp_tensors = results[level]['fp']
+        smiles_list = results[level]['smiles']
         
         if level == -1:
             save_file = output_file
+            smiles_file = os.path.join(os.path.dirname(output_file), 'smiles.txt')
         else:
             save_file = output_file.replace('.pt', f'_level{level_str}.pt')
+            smiles_file = os.path.join(os.path.dirname(output_file), f'smiles_level{level_str}.txt')
         
         torch.save({
             'vocab': vocab_tensors,
@@ -273,6 +286,9 @@ def main(
             'max_valid_seq_len': max_valid_len_counts,
             'max_level': level,
         }, save_file)
+
+        with open(smiles_file, 'w') as f:
+            f.writelines([f'{smiles}\n' for smiles in smiles_list])
 
         with open(tensor_stats_file, 'a') as f:
             f.write(f'{level}\t{vocab_tensors.size(0)}\n')

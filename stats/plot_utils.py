@@ -87,3 +87,54 @@ def plot_counter_distribution(counter: Counter, save_file=None, display_thresh=N
     df.index.name = 'BinStart'
 
     return df
+
+def plot_category_distribution(df, column_name, plot_type='pie', top=None, title_fontsize=16):
+    """
+    Plot a pie chart or bar chart of the category distribution for a specified column in a DataFrame.
+    
+    Parameters:
+    - df: pandas DataFrame
+    - column_name: The name of the column to analyze (str)
+    - plot_type: 'pie' for pie chart, 'bar' for bar chart (default is 'pie')
+    - top: Number of top categories to display. If None, show all categories. (default is None)
+    - title_fontsize: Font size for the plot title (default is 16)
+    
+    Returns:
+    - Displays the plot
+    """
+    # Count the number of occurrences for each category in the specified column
+    category_counts = df[column_name].value_counts()
+
+    # If 'top' is specified, group all categories beyond the 'top' count into 'other'
+    if top is not None and top < len(category_counts):
+        top_categories = category_counts[:top]  # Select top N categories
+        other_count = category_counts[top:].sum()  # Sum the remaining categories
+        folded_category_count = len(category_counts[top:])  # Count the number of folded categories
+        other_label = f"Other ({folded_category_count} categories)"  # Create the label with folded count
+        category_counts = top_categories.append(pd.Series([other_count], index=[other_label]))
+    
+    if plot_type == 'pie':
+        # Plot pie chart
+        category_counts.plot(
+            kind='pie', 
+            autopct='%1.1f%%', 
+            startangle=90, 
+            colors=['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'gray']  # Last color for 'Other'
+        )
+        plt.ylabel('')  # Remove unnecessary y-label
+        plt.title(f'Distribution of {column_name}', fontsize=title_fontsize)
+        plt.axis('equal')  # Make sure the pie is drawn as a circle
+    elif plot_type == 'bar':
+        # Plot bar chart
+        ax = category_counts.plot(kind='bar', color=['C0', 'C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C8', 'C9', 'gray'])
+        plt.ylabel('Count')
+        plt.title(f'Distribution of {column_name}', fontsize=title_fontsize)
+        
+        # Rotate x-axis labels to prevent overlapping
+        plt.xticks(rotation=45, ha='right')  # Rotate x-axis labels and align to the right
+
+        # Adjust layout to avoid overlapping elements
+        plt.tight_layout()
+
+    # Display the plot
+    plt.show()

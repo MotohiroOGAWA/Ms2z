@@ -32,7 +32,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     load_dir = os.path.join(work_dir, 'projects', load_name)
     if not os.path.exists(load_dir):
         os.makedirs(load_dir)
-
+    print(f"Working directory: {load_dir}")
     
     input_file = files['tree']
 
@@ -91,19 +91,21 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         initial_epoch = 0
         max_epoch = epochs
         global_step = 0
-        token_pre_train_epoch = 500
+        token_pre_train_epoch = model_info['token_pre_train_epoch']
 
         model = Ms2z(
             vocab_data=vocab_data,
             max_seq_len=max_seq_len,
             node_dim=model_info['node_dim'],
             edge_dim=model_info['edge_dim'],
+            joint_edge_dim=model_info['joint_edge_dim'],
             latent_dim=model_info['latent_dim'],
             decoder_layers=model_info['decoder_layers'],
             decoder_heads=model_info['decoder_heads'],
             decoder_ff_dim=model_info['decoder_ff_dim'],
             decoder_dropout=model_info['decoder_dropout'],
             fp_dim=fp_dim,
+            target_var=model_info['target_var'],
         ).to(device)
 
         # define optimizer
@@ -141,7 +143,7 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
     start_time = time.time()
     for epoch in range(initial_epoch, max_epoch):
         model.train()
-        if epoch < 50 * 8:
+        if level != -1 and epoch < 50 * 8:
             if (epoch+1) % 50 == 0:
                 level += 1
         else:
@@ -196,13 +198,10 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
 
             global_step += 1
 
-            loss_items = {key: f"{value.item():6.3f}" for key, value in loss_list.items()}
-            loss_items['loss'] = f"{loss.item():6.3f}"
-            for loss_key, acc in acc_list.items():
-                if loss_key in loss_items:
-                    loss_items[loss_key] = f'{loss_items[loss_key]}({acc:.3f})'
-                else:
-                    loss_items[loss_key] = f'({acc:.3f})'
+            loss_items = {key: f"{value['loss']:6.3f}" for key, value in target_data.items()}
+            for key, value in target_data.items():
+                if value['accuracy'] is not None:
+                    loss_items[key] = f'{loss_items[key]}({value["accuracy"]:.3f})'
             batch_iterator.set_postfix(loss_items)
 
             current_time = time.time() - start_time
@@ -225,7 +224,10 @@ def main(device, work_dir, files, load_name, load_epoch, load_iter, batch_size, 
         # Validation
         val_loss, val_target_data = run_validation(model, val_dataloader, logger, global_step, epoch+1, optimizer=optimizer, timestamp=current_time, extra_columns={'level': level})
         val_loss_list = np.append(val_loss_list, val_loss)
-        val_loss_items = loss_items = {key: f"{value['loss']:6.3f}" for key, value in val_target_data.items()}
+        val_loss_items = {key: f"{value['loss']:6.3f}" for key, value in val_target_data.items()}
+        for key, value in val_target_data.items():
+            if value['accuracy'] is not None:
+                val_loss_items[key] = f'{val_loss_items[key]}({value["accuracy"]:.3f})'
         print(f"Validation Loss after epoch {epoch+1}: {val_loss_items} {val_loss}")
         
         # Save the model and optimizer
@@ -296,14 +298,15 @@ def calc_loss(loss_list):
     z_fp_loss = loss_list['z_fp']
     kl_loss = loss_list['KL']
     predict_token_loss = loss_list['pred_token']
+    predict_root_joint_loss = loss_list['pred_root_joint']
+    predict_parent_joint_loss = loss_list['pred_parent_joint']
     ve_loss = loss_list['ve']
     token_loss = loss_list['token']
 
-    loss = z_fp_loss + 0.1 * kl_loss + predict_token_loss + ve_loss + token_loss
+    # loss = z_fp_loss + 0.1 * kl_loss + predict_token_loss + predict_root_joint_loss + predict_parent_joint_loss + ve_loss + token_loss
+    loss = 0.1 * kl_loss + predict_token_loss + predict_root_joint_loss + predict_parent_joint_loss + ve_loss + token_loss
 
     return loss
-
-
 
 def read_tensor_file(input_file):
     input_tensor = torch.load(input_file)

@@ -38,6 +38,7 @@ class GradientLogger:
         
         if len(self) % self.save_interval == 0:
             self.save(self.file)
+            exit()
 
     def _log_step(self, step, epoch):
         """
@@ -51,7 +52,7 @@ class GradientLogger:
         self.epochs.append(epoch)
 
 
-    def plot_gradients(self):
+    def plot_gradients(self, filter_params=[]):
         """
         Plot gradients for each parameter individually over global steps.
         """
@@ -60,6 +61,8 @@ class GradientLogger:
             return
 
         for name, values in self.gradients.items():
+            if name in filter_params:
+                continue
             plt.figure(figsize=(10, 6))
 
             # Plot gradients for the current parameter

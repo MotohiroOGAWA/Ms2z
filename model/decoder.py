@@ -41,6 +41,9 @@ class FragEmbeddings(nn.Module):
         one_hot_bond_type = torch.cat([torch.eye(3), torch.zeros(1,3)], dim=0).to(torch.float32) # [4*3]
         self.bond_type = nn.Parameter(one_hot_bond_type, requires_grad=False) # [-, =, #, nan]
 
+        # joint potential
+        self.joint_potential = nn.Parameter(joint_potential, requires_grad=False)
+
         # fingerprint
         self.fp_linear = nn.Sequential(
             nn.Linear(node_dim, node_dim),
@@ -489,48 +492,16 @@ class HierGATBlock(nn.Module):
         x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
         x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
 
-        x = self.self_attention(x, x, x, node_mask)
+        x = self.self_attention(x, x, x, key_mask=node_mask)
         x = self.norm2(x + self.dropout(x))
 
-        x = self.enc_dec_attention(x, enc_output, enc_output, node_mask)
+        x = self.enc_dec_attention(x, enc_output, enc_output, query_mask=node_mask)
         x = self.norm3(x + self.dropout(x))
 
         x = self.feed_forward(x)
         x = self.norm4(x + self.dropout(x))
 
         return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
-    
-# class SelfGATBlock(nn.Module):
-#     def __init__(self, embed_dim, edge_dim, heads, ff_dim, dropout=0.1):
-#         super(SelfGATBlock, self).__init__()
-#         self.gat = GATLayer(embed_dim, embed_dim, edge_dim)
-#         self.self_attention = MultiHeadAttentionBlock(embed_dim, h=heads, dropout=dropout)
-                
-#         # Feed Forward Block
-#         self.feed_forward = FeedForwardBlock(embed_dim, ff_dim, dropout)
-
-#         # Layer Normalization
-#         self.norm1 = nn.LayerNorm(embed_dim)
-#         self.norm2 = nn.LayerNorm(embed_dim)
-#         self.norm3 = nn.LayerNorm(embed_dim)
-        
-#         # Dropout
-#         self.dropout = nn.Dropout(dropout)
-
-#     def forward(self, x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges=None):
-#         # Shape of x [batch_size, seq_len, in_features]
-#         # Shape of unk_feature [in_features]
-#         # Shape of enc_output [batch_size, 1, dim]
-#         x,_valid_edges = self.gat(x, edge_index, edge_attr, node_mask, edge_mask, _valid_edges)
-#         x = self.norm1(x + self.dropout(x))  # Apply feed-forward block
-
-#         x = self.self_attention(x, x, x, node_mask)
-#         x = self.norm2(x + self.dropout(x))
-
-#         x = self.feed_forward(x)
-#         x = self.norm3(x + self.dropout(x))
-
-#         return x, _valid_edges  # Shape: [batch_size, seq_len, num_nodes, node_dim]
     
 
 class MultiHeadAttentionBlock(nn.Module):
@@ -564,7 +535,7 @@ class MultiHeadAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod
-    def attention(query, key, value, mask=None, dropout=None):
+    def attention(query, key, value, query_mask=None, key_mask=None, dropout=None):
         """
         Calculate the scaled dot-product attention.
         
@@ -572,7 +543,7 @@ class MultiHeadAttentionBlock(nn.Module):
             query (torch.Tensor): The query matrix Q.
             key (torch.Tensor): The key matrix K.
             value (torch.Tensor): The value matrix V.
-            mask (torch.Tensor, optional): The mask to prevent attention to certain positions.
+            query_mask (torch.Tensor, optional): The mask to prevent attention to certain positions.
             dropout (nn.Dropout, optional): Dropout layer for attention scores.
 
         Returns:
@@ -584,13 +555,19 @@ class MultiHeadAttentionBlock(nn.Module):
         attention_scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
 
         # Apply mask (if provided)
-        if mask is not None:
+        if key_mask is not None:
             # Expand mask to match the attention scores dimensions
-            expand_mask = mask.unsqueeze(2).unsqueeze(3).transpose(3, 4).expand(attention_scores.shape)
-            attention_scores = attention_scores.masked_fill(expand_mask == True, -1e9)
+            expand_key_mask = key_mask.unsqueeze(3).unsqueeze(4).transpose(2,4).expand(attention_scores.shape)
+            attention_scores = attention_scores.masked_fill(expand_key_mask == False, -1e9)
 
         # Apply softmax to normalize the scores
-        attention_scores = torch.softmax(attention_scores, dim=-1)
+        if query_mask is None:
+            attention_scores = torch.softmax(attention_scores, dim=-1)
+
+        # if query_mask is not None:
+        #     # Expand mask to match the attention scores dimensions
+        #     expand_query_mask = query_mask.unsqueeze(3).unsqueeze(4).transpose(2,3).expand(attention_scores.shape)
+        #     attention_scores = attention_scores.masked_fill(expand_query_mask == False, 0.0)
 
         # Apply dropout (if provided)
         if dropout is not None:
@@ -599,7 +576,7 @@ class MultiHeadAttentionBlock(nn.Module):
         # Compute the attention-weighted output
         return torch.matmul(attention_scores, value), attention_scores
 
-    def forward(self, q, k, v, mask=None):
+    def forward(self, q, k, v, query_mask=None, key_mask=None):
         """
         Forward pass of the Multi-Head Attention block.
 
@@ -618,12 +595,12 @@ class MultiHeadAttentionBlock(nn.Module):
         value = self.w_v(v)
 
         # Split the embeddings into h heads and reshape (batch_size, seq_len, embed_dim) --> (batch_size, h, seq_len, d_k)
-        query = query.view(query.shape[0], query.shape[1], query.shape[2], self.h, self.d_k).transpose(2, 3)
-        key = key.view(key.shape[0], key.shape[1], key.shape[2], self.h, self.d_k).transpose(2, 3)
-        value = value.view(value.shape[0], value.shape[1], value.shape[2], self.h, self.d_k).transpose(2, 3)
+        query = query.view(query.shape[0], query.shape[1], query.shape[2], self.h, self.d_k).transpose(2, 3).contiguous()
+        key = key.view(key.shape[0], key.shape[1], key.shape[2], self.h, self.d_k).transpose(2, 3).contiguous()
+        value = value.view(value.shape[0], value.shape[1], value.shape[2], self.h, self.d_k).transpose(2, 3).contiguous()
 
         # Compute attention
-        x, self.attention_scores = self.attention(query, key, value, mask, self.dropout)
+        x, self.attention_scores = self.attention(query, key, value, query_mask, key_mask, self.dropout)
 
         # Concatenate all heads back together (batch_size, h, seq_len, d_k) --> (batch_size, seq_len, embed_dim)
         x = x.transpose(2, 3).contiguous().view(x.shape[0], q.shape[1], q.shape[2], self.h * self.d_k)
