@@ -31,7 +31,7 @@ def load_ms2z_model(work_dir, load_name, load_epoch, load_iter, device):
                 extra_config_data={'vocab_data': vocab_data}
                 )
         
-        return model, load_epoch, global_step
+        return model, load_epoch, global_step, vocab_data
     else:
         raise ValueError("load_epoch must be set to a positive integer.")
 

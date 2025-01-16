@@ -420,7 +420,7 @@ class Ms2z(nn.Module):
 
         return fp_loss
 
-    def calc_predict_token_loss(self, node_embed, tgt_token_id):
+    def calc_predict_token_loss(self, node_embed, tgt_token_id, detail=False):
         # Project node embeddings to vocabulary logits
         logits_vocab = self.output_word_layer(node_embed)  # Shape: [data_size, node_dim] -> [data_size, vocab_size]
         # Apply Softmax to get probabilities
@@ -448,7 +448,10 @@ class Ms2z(nn.Module):
         accuracy = correct.mean()
         # tgt_token_id[torch.where(correct >= 1.0)[0]]
 
-        return loss, accuracy
+        if detail:
+            return losses, correct
+        else:
+            return loss, accuracy
 
     def calc_predict_root_joint_loss(self, edge_embed, tgt_root_joint):
         if edge_embed.size(0) == 0:
@@ -492,6 +495,85 @@ class Ms2z(nn.Module):
     def calc_node_embed_loss(self, node_embed, tgt_token_id_flat):
         node_embed = self.vocab_embed_linear(node_embed)
         return self.vocab_embedding.calc_node_loss(node_embed, tgt_token_id_flat)
+
+    def get_detail_loss(self, vocab_tensor, order_tensor, mask_tensor, fp_tensor):
+        """
+        Forward pass for Ms2z model.
+
+        Args:
+            vocab_tensor (torch.Tensor): Vocabulary input tensor.
+            order_tensor (list of torch.Tensor): Order tensors for graph adjacency. [batch_size, seq_len, 5 (parent_idx, parent_atom_pos, atom_pos, bond_type[1~3], level)]
+            mask_tensor (list of torch.Tensor): Mask tensors.
+
+        Returns:
+            z (torch.Tensor): Sampled latent variable.
+            mean (torch.Tensor): Mean of the latent variable.
+            log_var (torch.Tensor): Log variance of the latent variable.
+        """
+        node_embed, edge_attr, token_seq_tensor, edge_index, mask_tensor_ex, \
+            target_tensor, parent_token_seq_tensor, root_atom_pos_tensor, \
+                tgt_root_atom_pos_tensor, joint_atom_pos_tensor, tgt_joint_atom_pos_tensor, \
+                    root_bond_type_tensor, tgt_root_bond_type_tensor, joint_bond_type_tensor, \
+                        unk_nodes = self.prepare_input(vocab_tensor, order_tensor, mask_tensor)
+
+        # Calculate latent variable
+        z, mean, log_var = self.calc_chem_z(node_embed[:,1:], edge_attr[:,1:], order_tensor, mask_tensor)
+
+        # Transformer decoder
+        memory = z.unsqueeze(1) # [batch_size, 1, latent_dim]
+        memory = self.memory_linear(memory) # [batch_size, 1, node_dim+edge_dim]
+
+        # Decode using Transformer Decoder
+        memory_mask = torch.zeros(memory.size(0), memory.size(1), dtype=torch.bool).to(memory.device)
+        memory_mask[:, 0] = True
+
+        # node_dim + edge_dim + joint_edge_dim
+        # [batch_size, seq_len+1, node_dim+edge_dim] -> [batch_size, seq_len+1, node_dim+edge_dim+joint_edge_dim]
+        node_embed_with_joint = torch.cat([node_embed, torch.zeros(node_embed.shape[:-1]+(self.joint_edge_dim,), dtype=node_embed.dtype, device=node_embed.device)], dim=-1)
+        node_joint_potentials = self.vocab_embedding.joint_potential[parent_token_seq_tensor][...,1]
+
+        # Decoder
+        decoder_output = self.decoder(
+            x=node_embed_with_joint,
+            edge_index=edge_index,
+            edge_attr=node_joint_potentials,
+            enc_output=memory,
+            unk_feature=unk_nodes,
+            tgt_mask=mask_tensor_ex,
+            memory_mask=memory_mask
+        ) # Shape: [batch_size, seq_len, node_dim+edge_dim+joint_edge_dim]
+
+        # Flatten for output layer
+        output_flat = decoder_output.view(-1, decoder_output.size(-1)) # Shape: [batch_size*seq_len, node_dim+edge_dim+joint_edge_dim]
+        
+        tgt_token_id_flat = target_tensor.view(-1)
+        # tgt_bond_pos_tensor = torch.cat([order_tensor[:,:,2], padding], dim=1)
+        # tgt_bond_pos_flat = tgt_bond_pos_tensor.view(-1)
+        valid_mask = tgt_token_id_flat != self.pad
+        valid_mask_without_eos = valid_mask & (tgt_token_id_flat != self.eos) & (tgt_root_atom_pos_tensor.view(-1)!=-1)
+
+
+        tgt_root_atom_pos_flat = tgt_root_atom_pos_tensor.view(-1)
+        tgt_parent_atom_pos_flat = tgt_joint_atom_pos_tensor.view(-1)
+        tgt_bond_type_flat = tgt_root_bond_type_tensor.view(-1)
+
+        output_flat_without_eos = output_flat[valid_mask_without_eos]
+        output_flat = output_flat[valid_mask]
+        tgt_token_id_flat = tgt_token_id_flat[valid_mask]
+        tgt_root_atom_pos_flat = tgt_root_atom_pos_flat[valid_mask_without_eos]
+        tgt_parent_atom_pos_flat = tgt_parent_atom_pos_flat[valid_mask_without_eos]
+        tgt_bond_type_flat = tgt_bond_type_flat[valid_mask_without_eos]
+        
+        node_embed_flat = output_flat[:,:self.node_dim] # [batch_size*seq_len, node_dim]
+        root_edge_embed_flat = output_flat_without_eos[:,self.node_dim:self.node_dim+self.edge_dim] # [batch_size*seq_len, edge_dim]
+        parent_joint_edge_embed_flat = output_flat_without_eos[:,self.node_dim+self.edge_dim:] # [batch_size*seq_len, joint_edge_dim]
+        
+        # calc token loss
+        predict_token_loss, predict_token_acc = self.calc_predict_token_loss(node_embed_flat, tgt_token_id_flat, detail=True)
+
+
+        return tgt_token_id_flat, predict_token_loss, predict_token_acc
+
 
     def get_config_param(self):
         """
