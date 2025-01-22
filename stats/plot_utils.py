@@ -4,7 +4,7 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import os
 
-def plot_counter_distribution(counter: Counter, save_file=None, display_thresh=None, y_scale='linear', bin_width=None):
+def plot_counter_distribution(counter: Counter, save_file=None, display_thresh=None, y_scale='linear', bin_width=None, verbose=True):
     """
     Plot a histogram and cumulative distribution based on a Counter object and return distribution data as a DataFrame.
     
@@ -14,6 +14,7 @@ def plot_counter_distribution(counter: Counter, save_file=None, display_thresh=N
         display_thresh (int, optional): Threshold to display bins with counts above this value.
         y_scale (str, optional): Y-axis scale ('linear' or 'log').
         bin_width (int, optional): Width of bins for the histogram.
+        verbose (bool, optional): If True, print messages (default: True).
     
     Returns:
         pandas.DataFrame: A DataFrame containing:
@@ -73,7 +74,8 @@ def plot_counter_distribution(counter: Counter, save_file=None, display_thresh=N
     if save_file:
         os.makedirs(os.path.dirname(save_file), exist_ok=True)
         plt.savefig(save_file)
-        print(f"Chart saved to {save_file}")
+        if verbose:
+            print(f"Chart saved to {save_file}")
     else:
         # Display the chart
         plt.show()
@@ -85,6 +87,10 @@ def plot_counter_distribution(counter: Counter, save_file=None, display_thresh=N
         'CumulativePercentage(Reversed)': reverse_cumulative_percentage
     }, index=bin_edges)
     df.index.name = 'BinStart'
+    df.index = df.index.astype(int)
+    df['Count'] = df['Count'].astype(int)
+    df['CumulativeCount(Reversed)'] = df['CumulativeCount(Reversed)'].astype(int)
+
 
     return df
 

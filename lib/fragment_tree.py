@@ -6,7 +6,8 @@ import copy
 from tqdm import tqdm
 
 from .utils import *
-from .fragment_group import FragmentGroup, Fragment, FragBondList, FragmentBond, split_fragment_info
+from .fragment_group import FragmentGroup, Fragment, FragBondList, FragmentBond
+from .fragment_edit import split_fragment
 
 
 class FragmentNode:
@@ -351,7 +352,7 @@ class FragmentTree:
                     if current_frag.atom_map[neighbor_idx] not in visited:
                         cut_atom_pairs.append((cut_atom_idx, neighbor_idx))
 
-            new_fragment_group = split_fragment_info(current_frag, cut_atom_pairs)
+            new_fragment_group = split_fragment(current_frag, cut_atom_pairs)
 
             if current_parent[0] == -1 and current_bond_pos == -1:
                 root_next[2] = (0, -1)

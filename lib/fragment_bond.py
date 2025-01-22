@@ -1,4 +1,5 @@
 from .utils import token_to_chem_bond, token_to_num_bond, bond_priority
+from typing import Iterator
 
 
 class FragmentBond:
@@ -41,10 +42,10 @@ class FragBondList:
     def __len__(self):
         return len(self.bonds)
     
-    def __iter__(self):
+    def __iter__(self) -> Iterator[FragmentBond]:
         return iter(self.bonds)
     
-    def __getitem__(self, key):
+    def __getitem__(self, key) -> FragmentBond:
         return self.bonds[key]
     
     def _sort_and_reassign_ids(self):

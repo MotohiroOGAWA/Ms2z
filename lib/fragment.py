@@ -17,7 +17,19 @@ class Fragment:
     # Map bond types to their respective annotations
     bond_annotations = {'-': '[Nh]', '=': '[Og]', '#': '[Ts]', ':': '[Lv]'}
 
-    def __init__(self, smiles, frag_bond_list, atom_map=None):
+    def __init__(self, smiles_or_mol, frag_bond_list:FragBondList|list=[], atom_map=None):
+        if isinstance(smiles_or_mol, str):
+            smiles = smiles_or_mol
+        elif isinstance(smiles_or_mol, Chem.Mol):
+            smiles = Chem.MolToSmiles(smiles_or_mol)
+        else:
+            raise ValueError("The input must be either a SMILES string or an RDKit molecule object.")
+        
+        if isinstance(frag_bond_list, list):
+            frag_bond_list = FragBondList(frag_bond_list)
+        elif not isinstance(frag_bond_list, FragBondList):
+            raise ValueError("The bond list must be an instance of FragBondList.")
+
         mol, smiles, frag_bond_list, atom_map, \
             mol_with_alt, smiles_with_alt, atom_map_with_alt \
                 = Fragment.normalize_frag_info(smiles, frag_bond_list, atom_map)
@@ -25,7 +37,7 @@ class Fragment:
         self.mol = Chem.MolFromSmiles(smiles)
         self.smiles = smiles
         if isinstance(frag_bond_list, FragBondList):
-            self.bond_list = frag_bond_list
+            self.bond_list: FragBondList = frag_bond_list
         else:
             raise ValueError("The bond list must be an instance of FragBondList.")
         self.atom_map = atom_map
@@ -49,12 +61,57 @@ class Fragment:
     def __eq__(self, other: Fragment):
         return tuple(self) == tuple(other)
 
+    def get_smiles_with_map(self):
+        mol = Chem.MolFromSmiles(self.smiles)
+        for atom in mol.GetAtoms():
+            atom.SetAtomMapNum(self.atom_map[atom.GetIdx()])
+        return Chem.MolToSmiles(mol)
+    
+    def get_smiles_with_idx(self):
+        mol = Chem.MolFromSmiles(self.smiles)
+        for atom in mol.GetAtoms():
+            atom.SetAtomMapNum(atom.GetIdx())
+        return Chem.MolToSmiles(mol)
+    
+    def get_smiles_with_alt_map(self):
+        mol = Chem.MolFromSmiles(self.smiles_with_alt)
+        for atom in mol.GetAtoms():
+            atom.SetAtomMapNum(self.atom_map_with_alt[atom.GetIdx()])
+        return Chem.MolToSmiles(mol)
+    
+    def get_smiles_with_alt_idx(self):
+        mol = Chem.MolFromSmiles(self.smiles_with_alt)
+        for atom in mol.GetAtoms():
+            atom.SetAtomMapNum(atom.GetIdx())
+        return Chem.MolToSmiles(mol)
+
     def get_bond_pos(self, atom_idx, bond_token, start_pos=0):
         match_bond_ids = self.bond_list.get_bond_ids(atom_idx, bond_token)
         return match_bond_ids[start_pos]
     
     def get_bond_poses(self, atom_idx, bond_token):
         return self.bond_list.get_bond_ids(atom_idx, bond_token)
+
+    def get_bond_poses_batch(self, atom_bond_list):
+        """
+        Retrieve bond positions for a list of atom indices and bond tokens.
+
+        Args:
+            atom_bond_list (list[tuple]): List of tuples containing atom index and bond token. 
+            [(atom_idx, bond_token), ...]
+
+        Returns:
+            list[int]: List of bond positions corresponding to the input atom-bond pairs.
+        """
+        bond_start_indices = defaultdict(int)  # Tracks the start index for each atom-bond pair
+        bond_positions = []
+
+        for atom_idx, bond_token in atom_bond_list:
+            bond_pos = self.get_bond_pos(atom_idx, bond_token, start_pos=bond_start_indices[(atom_idx, bond_token)])
+            bond_start_indices[(atom_idx, bond_token)] += 1
+            bond_positions.append(bond_pos)
+
+        return bond_positions
 
     def get_frag_bond_tensor(self):
         atom_num = self.mol.GetNumAtoms()
@@ -99,7 +156,7 @@ class Fragment:
         return Fragment(smiles, frag_bond_list, atom_map)
 
     @staticmethod
-    def normalize_frag_info(smiles, bond_list, atom_map = None):
+    def normalize_frag_info(smiles, bond_list:FragBondList, atom_map = None):
         mol = Chem.MolFromSmiles(smiles)
         mol_with_alt, smiles_with_alt, atom_map_with_alt = Fragment._add_bond_annotations(mol, bond_list, atom_map)
         normalized_mol, normalized_smiles, normalized_atom_map, normalized_bond_list = Fragment._remove_bond_annotations(mol_with_alt, atom_map_with_alt)
@@ -142,6 +199,17 @@ class Fragment:
 
         return new_mol, new_smiles, new_atom_map
     
+    def add_alt_bond(self, frag_bond_list):
+        new_mol = copy.deepcopy(self.mol)
+        new_frag_bond_list = copy.deepcopy(self.bond_list)
+        new_atom_map = copy.deepcopy(self.atom_map)
+        for frag_bond in frag_bond_list:
+            frag_bond = FragmentBond(frag_bond.atom_idx, frag_bond.bond_token)
+            new_frag_bond_list.add(frag_bond)
+        new_frag = Fragment(new_mol, new_frag_bond_list, new_atom_map)
+        return new_frag
+
+
     @staticmethod
     def _remove_bond_annotations(mol, atom_indices=None):
         """

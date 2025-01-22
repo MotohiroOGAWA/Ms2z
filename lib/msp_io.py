@@ -8,83 +8,112 @@ import re
 import dill
     
 
-def read_msp_file(filepath, numpy_type=False, encoding='utf-8', save_dir=None, overwrite=True, is_join_classyfire=False):
+def read_msp_file(filepath, numpy_type=False, encoding='utf-8', save_file=None, overwrite=True, is_join_classyfire=False) -> pd.DataFrame:
     file_size = os.path.getsize(filepath)
     processed_size = 0
-    line_count = 0
+    line_count = 1
 
     cols = {} # Create a data list for each column
     cc = {} # Dictionary to convert column names
-    peaks = []
+    # peaks = []
     peak = []
-    max_rows = 0
+    max_peak_cnt = 0
     record_cnt = 1
+    text = ""
+    error_text = ""
+    error_flag = False
     
     with open(filepath, 'r', encoding=encoding) as f:
         peak_flag = False
         with tqdm(total=file_size, desc="Read msp file") as pbar:
             for line in f.readlines():
-                if not peak_flag and line == '\n':
-                    continue
+                try:
+                    if not peak_flag and line == '\n':
+                        continue
 
-                if peak_flag and line == '\n':
-                    peak_flag = False
-                    peaks.append(np.array(peak))
-                    max_rows = max(max_rows, len(peak))
-                    peak = []
-                    record_cnt += 1
-                    for k in cols:
-                        cols[k].append("")
-                elif peak_flag:
-                    # Handling cases where peaks are tab-separated or space-separated
-                    if len(line.strip().split('\t')) == 2:
-                        mz, intensity = line.strip().split('\t')
-                    elif len(line.strip().split(' ')) == 2:
-                        mz, intensity = line.strip().split(' ')
-                    else:
-                        raise ValueError(f"Error: '{line.strip()}' was not split correctly.")
-                    mz, intensity = float(mz), float(intensity)
-                    peak.append([mz, intensity])
-                else:
-                    k, v = line.split(':', maxsplit=1)
-                    k, v = k.strip(), v.strip()
-                    k = k.replace(' ', '')
-                    if k not in cc:
-                        cc[k] = convert_to_unique_column(k)
-                        if cc[k] == "CollisionEnergy":
-                            cols[cc[k]+"1"] = [""] * record_cnt
-                            cols[cc[k]+"2"] = [""] * record_cnt
+                    text += line
+
+                    if peak_flag and line == '\n':
+                        peak_flag = False
+
+                        if not error_flag:
+                            #　エラーが生じなかった場合はデータを保存する
+                            # peaks.append(np.array(peak))
+                            if "Peak" not in cols:
+                                cc["Peak"] = "Peak"
+                                cols["Peak"] = [""] * record_cnt
+                            cols["Peak"][-1] = ";".join([f"{mz},{intensity}" for mz, intensity in peak])
+                            max_peak_cnt = max(max_peak_cnt, len(peak))
                         else:
-                            cols[cc[k]] = [""] * record_cnt
-                    if cc[k] == "CollisionEnergy":
-                        v1, v2 = convert_str_to_collision_energy(v)
-                        cols[cc[k]+"1"][-1] = v1
-                        cols[cc[k]+"2"][-1] = v2
-                    elif cc[k] == "PrecursorType":
-                        v = v.strip().replace(" ", "")
-                        cols[cc[k]][-1] = to_precursor_type.get(v, v)
-                    elif cc[k] == "Comments":
-                        # Extract computed SMILES from comments
-                        pattern = r'"computed SMILES=([^"]+)"'
-                        match = re.search(pattern, v)
-                        if match:
-                            if "SMILES" not in cols:
-                                cc["SMILES"] = "SMILES"
-                                cols["SMILES"] = [""] * record_cnt
-                            cols["SMILES"][-1] = match.group(1)
+                            # エラーが生じた場合はエラーデータとして保存する
+                            error_text += f"Record: {record_cnt}\n" + f"Rows: {line_count}\n"
+                            error_text += text + '\n\n'
+                            error_flag = False
+                            for k in cols:
+                                if len(cols[k]) == record_cnt:
+                                    cols[k].pop()
+                                elif len(cols[k]) > record_cnt:
+                                    error_text += f"Error: '{k}' has more data than the record count.\n"
+                        text = ""
+                        peak = []
+                        record_cnt += 1
+                        for k in cols:
+                            cols[k].append("")
+                    elif peak_flag:
+                        # Handling cases where peaks are tab-separated or space-separated
+                        if len(line.strip().split('\t')) == 2:
+                            mz, intensity = line.strip().split('\t')
+                        elif len(line.strip().split(' ')) == 2:
+                            mz, intensity = line.strip().split(' ')
+                        else:
+                            raise ValueError(f"Error: '{line.strip()}' was not split correctly.")
+                        mz, intensity = float(mz), float(intensity)
+                        peak.append([mz, intensity])
                     else:
-                        cols[cc[k]][-1] = v
-                    if k == "NumPeaks":
-                        peak_flag = True
-                
-                line_count += 1
-                processed_size = len(line.encode(encoding)) + 1
-                pbar.update(processed_size)
+                        k, v = line.split(':', maxsplit=1)
+                        k, v = k.strip(), v.strip()
+                        k = k.replace(' ', '')
+                        if k not in cc:
+                            cc[k] = convert_to_unique_column(k)
+                            if cc[k] == "CollisionEnergy":
+                                cols[cc[k]+"1"] = [""] * record_cnt
+                                cols[cc[k]+"2"] = [""] * record_cnt
+                            else:
+                                cols[cc[k]] = [""] * record_cnt
+                        if cc[k] == "CollisionEnergy":
+                            v1, v2 = convert_str_to_collision_energy(v)
+                            cols[cc[k]+"1"][-1] = v1
+                            cols[cc[k]+"2"][-1] = v2
+                        elif cc[k] == "PrecursorType":
+                            v = v.strip().replace(" ", "")
+                            cols[cc[k]][-1] = to_precursor_type.get(v, v)
+                        elif cc[k] == "Comments":
+                            # Extract computed SMILES from comments
+                            pattern = r'"computed SMILES=([^"]+)"'
+                            match = re.search(pattern, v)
+                            if match:
+                                if "SMILES" not in cols:
+                                    cc["SMILES"] = "SMILES"
+                                    cols["SMILES"] = [""] * record_cnt
+                                cols["SMILES"][-1] = match.group(1)
+                        else:
+                            cols[cc[k]][-1] = v
+                        if k == "NumPeaks":
+                            peak_flag = True
+                    
+                    line_count += 1
+                    processed_size = len(line.encode(encoding)) + 1
+                    pbar.update(processed_size)
+                except Exception as e:
+                    text = 'Error: ' + str(e) + '\n' + text
+                    error_flag = True
+                    pass
 
         # Append last peak data if file doesn't end with a blank line
         if line != '\n':
-            peaks.append(np.array(peak))
-            max_rows = max(max_rows, len(peak))
+            cols["Peak"] = ";".join([f"{mz},{intensity}" for mz, intensity in peak])
+            # peaks.append(np.array(peak))
+            max_peak_cnt = max(max_peak_cnt, len(peak))
 
         # Remove last empty rows in metadata
         for k in cols:
@@ -101,20 +130,53 @@ def read_msp_file(filepath, numpy_type=False, encoding='utf-8', save_dir=None, o
                 if msp_column_types[c] != "str":
                     df[c] = pd.to_numeric(df[c], errors='coerce').astype(msp_column_types[c])
         
-        if numpy_type:
-            peaks = pad_3d_array_with_nan(peaks, max_rows)
 
-    # Warn if the number of peaks doesn't match the number of metadata entries
-    if len(peaks) != len(df):
-        warnings.warn(f"Number of peaks ({len(peaks)}) and metadata ({len(df)}) do not match.")
+    # # Warn if the number of peaks doesn't match the number of metadata entries
+    # if len(peaks) != len(df):
+    #     warnings.warn(f"Number of peaks ({len(peaks)}) and metadata ({len(df)}) do not match.")
 
-    if save_dir is not None:
+    # df["Peak"] = peaks
+    df['IdxOri'] = df.index
+
+    if save_file is not None:
         try:
-            save_msp_data(peaks, df, save_dir, overwrite=overwrite)
+            save_msp_data(df, save_file, overwrite=overwrite)
         except FileExistsError as e:
             warnings.warn(str(e))
+
+    if error_text != '':
+        from datetime import datetime
+        now = datetime.now().strftime("%Y%m%d%H%M%S")
+        with open(os.path.splitext(filepath)[0] + f"_error_{now}.txt", "w") as f:
+            f.write(error_text)
             
-    return peaks, df
+    return df
+
+def extract_peak(msp_df, idx):
+    """
+    Extracts peak data from the given DataFrame for specified indices.
+
+    Parameters:
+        msp_df (pd.DataFrame): DataFrame containing the "Peak" column with peak data.
+        idx (int or list of int): Single index or a list of indices to extract peak data.
+
+    Returns:
+        np.ndarray or list of np.ndarray: If `idx` is a single index, returns a single 2D NumPy array.
+                                           If `idx` is a list, returns a list of 2D NumPy arrays.
+    """
+    if isinstance(idx, (int, np.integer)):  # Single index
+        peak_str = msp_df.loc[idx, "Peak"]
+        peak = np.array([[float(mz), float(intensity)] for mz, intensity in [p.split(",") for p in peak_str.split(";")]])
+        return peak
+    elif isinstance(idx, (list, np.ndarray)):  # Multiple indices
+        peaks = []
+        for i in idx:
+            peak_str = msp_df.loc[i, "Peak"]
+            peak = np.array([[float(mz), float(intensity)] for mz, intensity in [p.split(",") for p in peak_str.split(";")]])
+            peaks.append(peak)
+        return peaks
+    else:
+        raise ValueError("idx must be an int or a list/array of int.")
 
 def save_msp_data(peaks, metadata_df, save_dir, overwrite=True):
     # Check if the directory already exists and handle overwrite option

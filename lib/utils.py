@@ -491,6 +491,51 @@ def frag_to_joint_list(frag_tuple):
     return joint_list
 
 
+def get_ring_groups(mol):
+    """
+    Group the ring structures in a molecule and return them.
+    Rings that share common atoms are merged into the same group.
+
+    Parameters:
+        mol (Chem.Mol): RDKit molecule object
+
+    Returns:
+        list[set]: A list of sets, where each set contains the atom indices of a ring group.
+    """
+    # Retrieve ring information from the molecule
+    ring_info = mol.GetRingInfo()
+    all_rings = [set(ring) for ring in ring_info.AtomRings()]  # Convert each ring to a set
+
+    # Merge connected ring information
+    ring_groups = []  # List to store ring groups
+    visited_rings = set()  # Set to track visited ring indices
+
+    for i, ring in enumerate(all_rings):
+        if i in visited_rings:
+            continue
+
+        # Create a new group and start exploration
+        current_group = ring.copy()
+        visited_rings.add(i)
+        queue = [i]
+
+        while queue:
+            current_ring_idx = queue.pop(0)
+            current_ring = all_rings[current_ring_idx]
+
+            # Check for connections with other rings
+            for j, next_ring in enumerate(all_rings):
+                if j not in visited_rings and current_ring.intersection(next_ring):
+                    visited_rings.add(j)
+                    queue.append(j)
+                    current_group.update(next_ring)
+
+        # Add the completed group
+        ring_groups.append(current_group)
+
+    return ring_groups
+
+        
 
 def count_atoms_in_molecule(mol, ignore_hydrogen=True):
     """
