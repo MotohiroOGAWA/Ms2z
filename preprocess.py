@@ -10,6 +10,12 @@ import os
 
 from rdkit import Chem
 
+# Disable RDKit logging
+from rdkit import RDLogger
+lg = RDLogger.logger()
+lg.setLevel(RDLogger.CRITICAL)  # Only show critical errors, suppress warnings and other messages
+
+
 def main(args):
     os.makedirs(args.save_dir, exist_ok = True)
 
@@ -52,7 +58,7 @@ def main(args):
             # raise ValueError("There might be some errors. Check your SMILES data.")
 
     # print("Process 2/9 is running", end = '...')
-    fragmentizer = Fragmentizer()
+    fragmentizer = Fragmentizer(max_attach_atom_cnt=1)
     attachment_counter = {}
     motif_counter = Counter()
     # fragments = []
@@ -76,13 +82,14 @@ def main(args):
     for i, m in iterator:
         try:
             smiles = Chem.MolToSmiles(copy.deepcopy(m), canonical=True)
-            motifs, _ = fragmentizer.split_to_motif(m, max_attach_atom_cnt=1)
+            motifs, _ = fragmentizer.split_to_motif(m)
             for motif in motifs:
                 if motif.smiles not in attachment_counter:
                     attachment_counter[motif.smiles] = {}
-                if motif.attachment.parts not in attachment_counter[motif.smiles]:
-                    attachment_counter[motif.smiles][motif.attachment.parts] = 0
-                attachment_counter[motif.smiles][motif.attachment.parts] += 1
+                att_tuple = motif.attachment.to_tuple()
+                if att_tuple not in attachment_counter[motif.smiles]:
+                    attachment_counter[motif.smiles][att_tuple] = 0
+                attachment_counter[motif.smiles][att_tuple] += 1
                 motif_counter[motif.smiles] += 1
             success_cnt += 1
             valid_smiles.append(smiles)

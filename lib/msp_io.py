@@ -3,6 +3,7 @@ import numpy as np
 import os
 from tqdm import tqdm
 import warnings
+from typing import Tuple
 
 import re
 import dill
@@ -152,31 +153,59 @@ def read_msp_file(filepath, numpy_type=False, encoding='utf-8', save_file=None, 
             
     return df
 
-def extract_peak(msp_df, idx):
+def extract_peaks(msp_df, indices) -> Tuple[np.ndarray]:
     """
-    Extracts peak data from the given DataFrame for specified indices.
+    Extracts mass spectral peaks from an MSP DataFrame for multiple rows.
 
     Parameters:
-        msp_df (pd.DataFrame): DataFrame containing the "Peak" column with peak data.
-        idx (int or list of int): Single index or a list of indices to extract peak data.
+        msp_df (pandas.DataFrame): A DataFrame containing mass spectral data, 
+                                   where the "Peak" column stores peak information as strings.
+                                   Each string contains peaks formatted as "mz,intensity;...".
+        indices (list, np.ndarray, tuple): A list, numpy array, or tuple of integer indices specifying 
+                                           the rows to extract peaks from.
 
     Returns:
-        np.ndarray or list of np.ndarray: If `idx` is a single index, returns a single 2D NumPy array.
-                                           If `idx` is a list, returns a list of 2D NumPy arrays.
+        tuple[np.ndarray]: A tuple of numpy arrays, where each array contains the peaks for a specific row.
+                           Each array is a 2D array with shape (n, 2), where n is the number of peaks
+                           and each row contains [mz, intensity].
+
+    Raises:
+        ValueError: If `indices` is not a list, numpy array, or tuple of integers.
+    """
+    if isinstance(indices, (list, np.ndarray, tuple)):
+        peaks = []
+        for i in indices:
+            peak_str = msp_df.loc[i, "Peak"]
+            peak = np.array([[float(mz), float(intensity)] for mz, intensity in [p.split(",") for p in peak_str.split(";")]])
+            peaks.append(peak)
+        return tuple(peaks)
+    else:
+        raise ValueError("indices must be a list/np.ndarray/tuple of int.")
+    
+def extract_peak(msp_df, idx) -> np.ndarray:
+    """
+    Extracts mass spectral peaks from an MSP DataFrame for a single row.
+
+    Parameters:
+        msp_df (pandas.DataFrame): A DataFrame containing mass spectral data, 
+                                   where the "Peak" column stores peak information as strings.
+                                   Each string contains peaks formatted as "mz,intensity;...".
+        idx (int): An integer index specifying the row to extract peaks from.
+
+    Returns:
+        np.ndarray: A numpy array containing the peaks for the specified row.
+                    The array is a 2D array with shape (n, 2), where n is the number of peaks,
+                    and each row contains [mz, intensity].
+
+    Raises:
+        ValueError: If `idx` is not an integer.
     """
     if isinstance(idx, (int, np.integer)):  # Single index
         peak_str = msp_df.loc[idx, "Peak"]
         peak = np.array([[float(mz), float(intensity)] for mz, intensity in [p.split(",") for p in peak_str.split(";")]])
         return peak
-    elif isinstance(idx, (list, np.ndarray)):  # Multiple indices
-        peaks = []
-        for i in idx:
-            peak_str = msp_df.loc[i, "Peak"]
-            peak = np.array([[float(mz), float(intensity)] for mz, intensity in [p.split(",") for p in peak_str.split(";")]])
-            peaks.append(peak)
-        return peaks
     else:
-        raise ValueError("idx must be an int or a list/array of int.")
+        raise ValueError("idx must be an int.")
 
 def save_msp_data(peaks, metadata_df, save_dir, overwrite=True):
     # Check if the directory already exists and handle overwrite option

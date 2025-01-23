@@ -32,9 +32,9 @@ def main(work_dir, vocab_file, smiles_file, output_dir, max_seq_len):
     failed_smiles_file = os.path.join(output_dir, 'error_smiles.txt')
     with open(failed_smiles_file, 'w') as f:
         f.write('')
-    smiles_list = [
-        'CCCSc1nc(C)cc(C)c1C(=N)N',
-    ]
+    # smiles_list = [
+    #     'CCCSc1nc(C)cc(C)c1C(=N)N',
+    # ]
     with tqdm(total=len(smiles_list), mininterval=0.5) as pbar:
         for smiles in smiles_list:
             # try:
@@ -42,6 +42,14 @@ def main(work_dir, vocab_file, smiles_file, output_dir, max_seq_len):
                 output_smiles = 'None'
                 input_mol = Chem.MolFromSmiles(smiles)
                 input_smiles = Chem.MolToSmiles(input_mol, canonical=True)
+
+                success_cnt += vocab.assign_vocab(input_mol)
+                total_cnt += 1
+                pbar.update(1)
+                pbar.set_postfix_str(f'Success: {success_cnt}/{total_cnt} ({success_cnt/total_cnt:.2%})')
+                continue
+
+
                 # print(f"Input SMILES: {input_smiles}")
                 tensor = vocab.tensorize(input_mol, max_seq_len=max_seq_len)
                 if tensor is None:

@@ -1,0 +1,22 @@
+max_exact_mass: 1300 # 99% line
+max_atom_counts:
+  C: 80
+  O: 30
+  N: 10
+  S: 3
+  P: 3
+  F: 2
+  Cl: 2
+  Br: 2
+  I: 2
+  # Si: 0
+  # B: 0
+adduct_types:
+  - "[M+H]+"
+  - "[M+NH4]-"
+  - "[M+Na]+"
+  - "[M+K]+"
+  
+  - "[M-H]-"
+  - "[M+HCOO]-"
+  - "[M+CH3COO]-"

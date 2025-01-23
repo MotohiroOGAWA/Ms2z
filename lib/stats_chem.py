@@ -10,8 +10,8 @@ import glob
 import matplotlib.pyplot as plt
 
 try:
-    from .calc_formula import formula_to_dict
-    from .chem_data import calc_exact_mass
+    from ..lib.calc_formula import formula_to_dict
+    from ..lib.chem_data import calc_exact_mass
 except ImportError:
     from calc_formula import formula_to_dict
     from chem_data import calc_exact_mass
@@ -61,14 +61,16 @@ def contains_ions(mol):
     return any(atom.GetFormalCharge() != 0 for atom in mol.GetAtoms())
 
 # Function to process a chunk of SMILES and save the atom counts
-def process_smiles_chunk(smiles_chunk, output_dir, chunk_index, progress_queue, no_ions):
+def process_smiles_chunk(smiles_chunk, ids_chunk, output_dir, chunk_index, progress_queue, no_ions):
     data = []
     
     # For each SMILES, count the atoms and append to the data list
-    for smiles in smiles_chunk:
+    for i, smiles in enumerate(smiles_chunk):
         result = count_atoms_and_mass(smiles, no_ions)
         if result is not None:
             smiles, atom_counts, exact_mass = result
+            if ids_chunk is not None:
+                atom_counts['ID'] = ids_chunk[i]
             atom_counts['SMILES'] = smiles
             atom_counts['ExactMass'] = exact_mass
             data.append(atom_counts)
@@ -77,8 +79,12 @@ def process_smiles_chunk(smiles_chunk, output_dir, chunk_index, progress_queue, 
     df = pd.DataFrame(data)
     
     # Ensure SMILES column is first, and cast counts to integer type
-    columns = ['SMILES', 'ExactMass'] + [col for col in df.columns if col != 'SMILES' and col != 'ExactMass']
-    df = df[columns].fillna(0).astype({col: int for col in df.columns if col != 'SMILES' and col != 'ExactMass'})  # fill NaN with 0 and convert counts to int
+    if 'ID' in df.columns:
+        columns = ['ID', 'SMILES', 'ExactMass']
+    else:
+        columns = ['SMILES', 'ExactMass']
+    columns = columns + [col for col in df.columns if col != 'ID' and col != 'SMILES' and col != 'ExactMass']
+    df = df[columns].fillna(0).astype({col: int for col in df.columns if col != 'ID' and col != 'SMILES' and col != 'ExactMass'})  # fill NaN with 0 and convert counts to int
     
     # Save the DataFrame to a Parquet file
     output_file = os.path.join(output_dir, f"smiles_chunk_{chunk_index}.parquet")
@@ -96,7 +102,9 @@ def count_atoms_in_file(smiles_file, output_dir, smiles_per_chunk=100, num_worke
     count_atoms_in_file_from_list(all_smiles, output_dir, smiles_per_chunk=smiles_per_chunk, num_workers=num_workers, no_ions=no_ions)
 
 
-def count_atoms_in_file_from_list(smiles_list, output_dir, smiles_per_chunk=100, num_workers=None, no_ions=True):
+def count_atoms_in_file_from_list(smiles_list, output_dir, smiles_per_chunk=100, num_workers=None, no_ions=True, id_list=None):
+    assert id_list is None or len(id_list) == len(smiles_list), "ID list must have the same length as the SMILES list"
+
     if num_workers is None:
         num_workers = cpu_count()  # Set number of workers based on CPU cores
 
@@ -113,10 +121,13 @@ def count_atoms_in_file_from_list(smiles_list, output_dir, smiles_per_chunk=100,
     distribution_output_parquet = os.path.join(output_dir, 'distribution_output.parquet')
     save_distribution_dir = os.path.join(output_dir, 'distribution_plots')
 
-    smiles_list = list(set(smiles_list))  # Remove duplicates
-
     # Split the SMILES list into chunks of size 'smiles_per_chunk'
     chunks = [smiles_list[i:i + smiles_per_chunk] for i in range(0, len(smiles_list), smiles_per_chunk)]
+    if id_list is None:
+        ids_chunks = [None]*len(chunks)
+    else:
+        ids_chunks = [id_list[i:i + smiles_per_chunk] for i in range(0, len(id_list), smiles_per_chunk)]
+
     
     # Use a multiprocessing Manager to track progress
     manager = Manager()
@@ -135,7 +146,7 @@ def count_atoms_in_file_from_list(smiles_list, output_dir, smiles_per_chunk=100,
     # Use a multiprocessing pool to process chunks in parallel
     with Pool(num_workers) as pool:
         for chunk_index, smiles_chunk in enumerate(chunks):
-            pool.apply_async(process_smiles_chunk, args=(smiles_chunk, chunk_dir, chunk_index, progress_queue, no_ions))
+            pool.apply_async(process_smiles_chunk, args=(smiles_chunk, ids_chunks[chunk_index], chunk_dir, chunk_index, progress_queue, no_ions))
 
         # Monitor progress and update the progress bar
         while progress_bar.n < total_chunks:
@@ -172,8 +183,10 @@ def merge_parquet_files(input_dir, output_file):
 
     combined_df = pd.concat(dataframes, ignore_index=True)
     combined_df = combined_df.fillna(0)
-    combined_df = combined_df.astype({col: int for col in combined_df.columns if col != 'SMILES' and col != 'ExactMass'})  # fill NaN with 0 and convert counts to int
-    combined_df = combined_df.drop_duplicates(subset=['SMILES'])
+    combined_df = combined_df.astype({col: int for col in combined_df.columns if col != 'ID' and col != 'SMILES' and col != 'ExactMass'})  # fill NaN with 0 and convert counts to int
+    # combined_df = combined_df.drop_duplicates(subset=['SMILES'])
+    if 'ID' in combined_df.columns:
+        combined_df = combined_df.sort_values('ID').sort_values(by='ID', key=lambda col: col.astype(int))
 
     # Save the combined DataFrame to a single Parquet file
     combined_df.to_parquet(output_file)
@@ -199,7 +212,7 @@ def calculate_atom_ratios(df):
     ratios = {}
     max_count = {}
     for c in tqdm(df.columns, desc='Calculating atom ratios'):
-        if c == 'SMILES' or c == 'ExactMass':
+        if c == 'ID' or c == 'SMILES' or c == 'ExactMass':
             continue
         ratios[c] = (df[c] > 0).sum() / total_compounds
         max_count[c] = df[c].max()
@@ -209,7 +222,7 @@ def calculate_atom_ratios(df):
     bin_edges = [i for i in range(0, all_max_count+1)]
     distributions = {}
     for c in tqdm(df.columns, desc='Calculating atom distribution'):
-        if c == 'SMILES' or c == 'ExactMass':
+        if c == 'ID' or c == 'SMILES' or c == 'ExactMass':
             continue
         distribution = np.histogram(df[c], bins=bin_edges)
         distributions[c] = distribution[0]
@@ -291,7 +304,7 @@ def calculate_tick_interval(data_min, data_max, num_ticks, integer_only=False):
     
     return max(1, int(interval))  # Ensure interval is never zero
 
-def plot_atom_count_distribution(distribution_df, bin_width=1, atom_columns=None, save_dir=None, num_xticks=10, log_scale=False, threshold=None):
+def plot_atom_count_distribution(distribution_df, bin_width=1, atom_columns=None, save_dir=None, num_xticks=10, log_scale=False, threshold=None, cumulative_percentage_line=None):
     """
     Plot the distribution of atom counts within molecules.
 
@@ -303,6 +316,7 @@ def plot_atom_count_distribution(distribution_df, bin_width=1, atom_columns=None
         num_xticks (int): Number of X-axis tick marks to display.
         log_scale (bool): Whether to use a logarithmic Y-axis scale.
         threshold (int): Minimum count value for bins to be displayed. Bins with counts below this threshold will be aggregated into "Other".
+        cumulative_percentage_line (float): Draw a vertical line at the bin where the specified cumulative percentage is reached (e.g., 0.95 for 95%).
     """
     distribution_paths = []
     
@@ -379,6 +393,14 @@ def plot_atom_count_distribution(distribution_df, bin_width=1, atom_columns=None
             ax2.plot(range(len(cumulative_values)), cumulative_values / cumulative_values[-1] * 100, color='red', linestyle='-')  # Solid line only
             ax2.set_ylabel('Cumulative Percentage (%)')
 
+            # Add cumulative percentage line if requested
+            if cumulative_percentage_line is not None:
+                cumulative_percentage = cumulative_values / cumulative_values[-1] * 100
+                line_idx = np.argmax(cumulative_percentage >= cumulative_percentage_line * 100)
+                ax1.axvline(x=line_idx, color='green', linestyle='--', label=f'{cumulative_percentage_line*100}% Line')
+                ax1.legend()
+                print(f'{cumulative_percentage_line} Line: {bin_edges[line_idx]}')
+
             # Adjust layout for better fit
             fig.tight_layout()
 
@@ -398,10 +420,11 @@ def plot_atom_count_distribution(distribution_df, bin_width=1, atom_columns=None
     return distribution_paths if save_dir else None
 
 
-def plot_exact_mass_distribution(atom_counts_df, exact_mass_column='ExactMass', top=None, save_file=None, y_scale='linear', threshold=None, bin_width=None):
+def plot_exact_mass_distribution(atom_counts_df, exact_mass_column='ExactMass', top=None, save_file=None, y_scale='linear', threshold=None, bin_width=None, cumulative_percentage_line=None):
     """
     Plots the distribution of the exact mass in the given DataFrame with specified bin width for histogram,
-    hiding bins with counts below the threshold. Also adds a cumulative line plot on a secondary y-axis.
+    hiding bins with counts below the threshold. Also adds a cumulative line plot on a secondary y-axis,
+    and allows specifying a cumulative percentage line (e.g., 0.95 for 95%).
 
     Args:
         atom_counts_df (pd.DataFrame): The input DataFrame containing the exact mass data.
@@ -411,14 +434,15 @@ def plot_exact_mass_distribution(atom_counts_df, exact_mass_column='ExactMass', 
         y_scale (str, optional): The scale for the Y-axis ('linear' or 'log'). Default is 'linear'.
         threshold (int, optional): The minimum count value for bins to display. Default is None, which displays all.
         bin_width (float, optional): The width of each bin for histogram. Default is None, which calculates automatically.
+        cumulative_percentage_line (float, optional): A value between 0 and 1 to draw a vertical line for the corresponding cumulative percentage.
     """
     # Check if the specified column exists in the DataFrame
     if exact_mass_column not in atom_counts_df.columns:
         raise ValueError(f"Column '{exact_mass_column}' not found in the DataFrame.")
-    
+
     # Extract the data from the specified column
     exact_mass_data = atom_counts_df[exact_mass_column]
-    
+
     # Apply top limit if specified
     if top is not None:
         exact_mass_data = exact_mass_data.nlargest(top)
@@ -466,6 +490,20 @@ def plot_exact_mass_distribution(atom_counts_df, exact_mass_column='ExactMass', 
     ax2.plot(bin_edges, cumulative_percentage, color='red', linestyle='-', linewidth=2)
     ax2.set_ylabel('Cumulative Percentage (%)')
     ax2.set_ylim(0, 100)
+
+    # Add a vertical line for the specified cumulative percentage
+    if cumulative_percentage_line is not None:
+        if not (0 <= cumulative_percentage_line <= 1):
+            raise ValueError("cumulative_percentage_line must be between 0 and 1.")
+
+        target_percentage = cumulative_percentage_line * 100
+        target_index = np.searchsorted(cumulative_percentage, target_percentage)
+
+        if target_index < len(bin_edges):
+            target_mass = bin_edges[target_index]
+            ax1.axvline(x=target_mass, color='green', linestyle='--', label=f'{target_percentage:.1f}% at {target_mass:.2f}')
+            ax1.legend()
+            print(f'{cumulative_percentage_line} Mass Line: {target_mass}')
 
     # Save the plot to a file if save_file is specified
     if save_file:

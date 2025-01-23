@@ -320,19 +320,22 @@ class Vocab:
             (motif_token, motif_idx), (att_tuple, att_idx) = self[motif]
             if motif_idx == -1 or att_idx == -1:
                 error_message += f", '{motif}' not in vocabulary"
+            else:
+                res_motif_smiles = self[motif_idx]
+                res_motif = self[(motif_idx, att_idx)]
             motif_att_idx_pair.append((motif_idx, att_idx))
-            res_motif_smiles = self[motif_idx]
-            res_motif = self[(motif_idx, att_idx)]
+            
 
         if len(error_message) > 0:
             error_message = f'Error: {Chem.MolToSmiles(mol, canonical=True)}' + error_message
+            return 0
             raise ValueError(error_message)
         
         primary_index = sorted(
             enumerate(motif_att_idx_pair),
             key=lambda x: (x[1][0], x[1][1]) 
         )[0][0]
-        
+        return 1
 
 
 
@@ -610,34 +613,7 @@ class Vocab:
     
 
 
-    def get_graph(self, fragment: Fragment):
-            # # get the graph
-            # self.vocab_idx_to_graph = {}
-            # for v, idx in tqdm(self.vocab.items(), desc='VocabToGraph', mininterval=0.5):
-            #     if v in Vocab.TOKENS:
-            #         node_tensor, edge_tensor, frag_bond_tensor = \
-            #             torch.zeros(0), \
-            #                 torch.zeros(0, 3, dtype=torch.int32), \
-            #                     torch.zeros(0, 3, dtype=torch.int32)
-            #     else:
-            #         node_tensor, edge_tensor, frag_bond_tensor = vocab_tuple_to_graph[v]
-                
-            #     self.vocab_idx_to_graph[idx] = (node_tensor, edge_tensor, frag_bond_tensor)
 
-        node_tensor = torch.tensor([self.symbol_to_idx[atom.GetSymbol()] for atom in fragment.mol.GetAtoms()], dtype=torch.int32)
-        frag_bond_tensor = fragment.get_frag_bond_tensor() #[atom_nums, 3 (fragment bond counter['-', '=', '#'])]
-
-        edge_list = []
-        for bond in fragment.mol.GetBonds():
-            atom1 = bond.GetBeginAtom().GetIdx()
-            atom2 = bond.GetEndAtom().GetIdx()
-            bond_type = bond.GetBondType()
-            bond_num = token_to_num_bond(chem_bond_to_token(bond_type))
-            edge_list.append((atom1, atom2, bond_num))
-        
-        edge_tensor = torch.tensor(edge_list, dtype=torch.int32)
-
-        return node_tensor, edge_tensor, frag_bond_tensor
 
     def get_formula_tensor(self, mols):
         symbol_map = {}
