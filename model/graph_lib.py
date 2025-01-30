@@ -1,8 +1,103 @@
 import torch
 import torch.nn as nn
+from torch_geometric.utils import scatter
 from collections import deque, defaultdict
 
+class LSTMGraphEmbedding(nn.Module):
+    def __init__(self, node_dim, edge_dim, hidden_dim, iterations, directed):
+        """
+        LSTM-based graph embedding class.
 
+        Args:
+            node_dim (int): Dimension of node features.
+            edge_dim (int): Dimension of edge attributes.
+            hidden_dim (int): Dimension of hidden layers.
+            iterations (int): Number of LSTM layers.
+            directed (bool): Whether the graph is directed. Default is True.
+        """
+        super(LSTMGraphEmbedding, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.iterations = iterations
+        self.directed = directed
+
+        # Linear layers to encode edge attributes
+        self.edge_encoder = nn.Sequential(
+            nn.Linear(edge_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+
+        # Linear layer to encode node features
+        self.node_encoder = nn.Sequential(
+            nn.Linear(node_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+
+        # LSTM layer
+        self.lstm = nn.LSTM(
+            input_size=hidden_dim,  # Input dimension is the embedding dimension
+            hidden_size=hidden_dim,  # Dimension of hidden layers
+            num_layers=iterations,
+            batch_first=True
+        )
+
+        # Output layer
+        self.output_layer = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, batched_data):
+        """
+        Forward propagation.
+
+        Args:
+            batched_data (Batch): Batched graph data object containing the following attributes:
+                - x (torch.Tensor): Node features [num_nodes, node_dim].
+                - edge_index (torch.Tensor): Edge index [2, num_edges].
+                - edge_attr (torch.Tensor): Edge attributes [num_edges, edge_dim].
+
+        Returns:
+            torch.Tensor: Node embeddings after processing [num_nodes, hidden_dim].
+        """
+        # Extract attributes from batched data
+        x, edge_index, edge_attr, batch = batched_data.x, batched_data.edge_index, batched_data.edge_attr, batched_data.batch
+
+        # Encode edge attributes
+        edge_embeddings = self.edge_encoder(edge_attr)  # [num_edges, hidden_dim]
+
+        # Encode node features
+        node_embeddings = self.node_encoder(x)  # [num_nodes, hidden_dim]
+
+        # Calculate messages for each edge
+        src, dst = edge_index
+        messages = node_embeddings[src] + edge_embeddings  # [num_edges, hidden_dim]
+
+        # Include reverse messages if the graph is undirected
+        if not self.directed:
+            reverse_messages = node_embeddings[dst] + edge_embeddings  # Reverse direction messages
+            all_messages = torch.cat([messages, reverse_messages], dim=0)  # Combine forward and reverse messages
+            all_dst = torch.cat([dst, src], dim=0)  # Combine destination nodes for both directions
+        else:
+            all_messages = messages
+            all_dst = dst
+
+        # Aggregate messages for each node
+        aggregated_messages = scatter(all_messages, all_dst, dim=0, reduce="mean")  # [num_nodes, hidden_dim]
+
+        # Update node embeddings using LSTM
+        lstm_input = aggregated_messages.unsqueeze(1)  # [num_nodes, 1, hidden_dim]
+        lstm_output, _ = self.lstm(lstm_input)  # [num_nodes, 1, hidden_dim]
+
+        # Process embeddings through the output layer
+        node_embeddings = self.output_layer(lstm_output.squeeze(1))  # [num_nodes, hidden_dim]
+
+        # Aggregate node embeddings to graph-level embeddings
+        graph_embeddings = scatter(node_embeddings, batch, dim=0, reduce="mean")  # [num_graphs, hidden_dim]
+
+        return graph_embeddings
 
 class Node:
     def __init__(self, node_id, features):
@@ -79,7 +174,7 @@ def prop_nodes_topo(node_data:dict[torch.Tensor], adj_matrix_list, processor, ma
                     parent_to_child_id_list[i][parent_id] = []
                 parent_to_child_id_list[i][parent_id].append(child_id)
 
-    nodes_list = [[Node(node_id, {key:value[i][node_id] for key, value in node_data.items()}) for node_id in torch.nonzero(mask_tensor[i], as_tuple=False)] for i in range(batch_size)]
+    nodes_list = [[Node(node_id, {key:value[i][node_id] for key, value in node_data.items()}) for node_id in torch.nonzero(~mask_tensor[i], as_tuple=False)] for i in range(batch_size)]
 
     # Process nodes level by level
     result = [defaultdict(dict) for _ in range(batch_size)]
@@ -243,10 +338,10 @@ def order_to_adj_matrix(order_tensor, mask_tensor=None):
         list of list of int: Adjacency matrix representing the graph, filtered by the mask.
     """
     if mask_tensor is None:
-        mask_tensor = [True] * len(order_tensor)  # If no mask provided, include all nodes
+        mask_tensor = [False] * len(order_tensor)  # If no mask provided, include all nodes
 
     # Create a mapping from original indices to filtered indices
-    filtered_indices = [i for i, mask in enumerate(mask_tensor) if mask]
+    filtered_indices = [i for i, mask in enumerate(mask_tensor) if not mask]
     index_map = {orig: new for new, orig in enumerate(filtered_indices)}
     num_nodes = len(filtered_indices)
 
@@ -255,7 +350,7 @@ def order_to_adj_matrix(order_tensor, mask_tensor=None):
 
     # Populate the adjacency matrix using the mask
     for child, parent in enumerate(order_tensor):
-        if mask_tensor[child] and parent != -1 and mask_tensor[parent]:
+        if not mask_tensor[child] and parent != -1 and not mask_tensor[parent]:
             adj_matrix[index_map[int(parent)]][index_map[int(child)]] = 1
 
     return torch.tensor(adj_matrix, dtype=torch.uint8)

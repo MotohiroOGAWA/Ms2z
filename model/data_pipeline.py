@@ -14,7 +14,6 @@ class BsDataset(TensorDataset):
 
     def __len__(self):
         return next(iter(self.tensors.values())).size(0)
-    
 
 def get_ds(
         variables: Dict[str, torch.Tensor], mode: str, 

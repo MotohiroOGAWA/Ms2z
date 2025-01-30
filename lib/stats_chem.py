@@ -13,8 +13,8 @@ try:
     from ..lib.calc_formula import formula_to_dict
     from ..lib.chem_data import calc_exact_mass
 except ImportError:
-    from calc_formula import formula_to_dict
-    from chem_data import calc_exact_mass
+    from .calc_formula import formula_to_dict
+    from .chem_data import calc_exact_mass
 
 # Disable RDKit logging
 from rdkit import RDLogger

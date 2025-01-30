@@ -304,7 +304,7 @@ class StructureEncoder(nn.Module):
         self.h_size = h_size
 
         # TreeLSTM cell
-        self.cell = ChildSumTreeLSTMCell(node_dim+edge_dim, edge_dim, h_size)
+        self.cell = ChildSumTreeLSTMCell(node_dim, edge_dim, h_size)
         # self.cell = ChildSumTreeSimpleCell(node_dim+edge_dim, edge_dim, h_size)
 
         # Linear transformations
@@ -320,18 +320,21 @@ class StructureEncoder(nn.Module):
             # nn.Linear(h_size, h_size),
         )
 
-    def forward(self, node_tensor, edge_attr, adj_matrix_list, mask_tensor):
+    def forward(self, node_embed, edge_attr, order_tensor, mask_tensor):
         """
         Forward pass for StructureEncoder.
         """
+        # Convert orders and masks into adjacency matrices
+        adj_matrix_list = [order_to_adj_matrix(order[:, 0], mask) for order, mask in zip(order_tensor, mask_tensor)]
+
         # Propagate messages through the tree structure
-        device = node_tensor.device
+        device = node_embed.device
         batch_size = len(adj_matrix_list)
         res = prop_nodes_topo({
-            'embed': node_tensor,
+            'embed': node_embed,
             'edge_attr': edge_attr,
-            'h': torch.zeros(node_tensor.size(0), node_tensor.size(1), self.h_size).to(node_tensor.device),
-            'c': torch.zeros(node_tensor.size(0), node_tensor.size(1), self.h_size).to(node_tensor.device),
+            'h': torch.zeros(node_embed.size(0), node_embed.size(1), self.h_size).to(node_embed.device),
+            'c': torch.zeros(node_embed.size(0), node_embed.size(1), self.h_size).to(node_embed.device),
         },
         adj_matrix_list=adj_matrix_list,
         processor=self.cell,

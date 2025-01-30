@@ -2,7 +2,11 @@ import os
 from lib.vocab import *
 
 def main(work_dir, vocab_file, attachment_counter_file, attachment_threshold, attachment_collapse_threshold):
-    vocab = Vocab(attachment_counter_file, attachment_threshold, attachment_collapse_threshold, save_path=vocab_file)
+    Vocab(attachment_counter_file, attachment_threshold, attachment_collapse_threshold, save_path=vocab_file)
+
+    vocab = Vocab.load(vocab_file)
+
+
 
 
 if __name__ == '__main__':
@@ -23,6 +27,9 @@ if __name__ == '__main__':
     attachment_counter_file = os.path.join(work_dir, 'preprocess', args.attachment_counter_file_name)
     attachment_threshold = args.attachment_threshold
     attachment_collapse_threshold = args.attachment_collapse_threshold
+
+    path_without_ext, file_ext = os.path.splitext(vocab_file)
+    vocab_file = f'{path_without_ext}_{attachment_threshold}_{attachment_collapse_threshold}{file_ext}'
     
     main(
         work_dir=work_dir,

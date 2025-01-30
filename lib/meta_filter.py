@@ -1,5 +1,7 @@
 from rdkit import Chem
 from rdkit.Chem import Descriptors
+from tqdm import tqdm
+import pandas as pd
 import yaml
 import os
 
@@ -7,21 +9,50 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.warning')
 
 from .msp_io import save_msp_data
-from .chem_data import read_aduct_type_data
+from .chem_data import read_adduct_type_data
 
 
-aduct_type_data = read_aduct_type_data()
-def filter_aduct_type(metadata_df, aduct_type:list[str], column = "PrecursorType"):
+aduct_type_data = read_adduct_type_data()
+def filter_adduct_type(metadata_df, aduct_type:list[str], column = "PrecursorType"):
     mask = metadata_df[column].isin(aduct_type)
     filtered_metadata = metadata_df[mask]
     return filtered_metadata
 
 
-def filter_smiles(metadata_df, column="SMILES"):
-    # mask = metadata_df[column].swifter.apply(lambda x: Chem.MolFromSmiles(x) is not None)
-    mask = metadata_df[column].apply(lambda x: Chem.MolFromSmiles(x) is not None)
-    filtered_metadata = metadata_df[mask]
-    return filtered_metadata
+# Enable tqdm progress bar for pandas
+tqdm.pandas()
+
+def filter_smiles(metadata_df, valid_canonical_smiles_list, column="SMILES"):
+    """
+    Filters the metadata DataFrame by canonicalizing SMILES strings and retaining only valid rows.
+
+    Args:
+        metadata_df (pd.DataFrame): Input metadata DataFrame containing a SMILES column.
+        valid_canonical_smiles_list (list): List of valid canonical SMILES strings.
+        column (str): Column name in metadata_df that contains the SMILES strings.
+
+    Returns:
+        pd.DataFrame: A filtered DataFrame containing only valid SMILES rows.
+    """
+    def canonicalize_smiles(smiles):
+        try:
+            # Convert SMILES to RDKit Mol object and back to canonical SMILES
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None  # Invalid SMILES
+            return Chem.MolToSmiles(mol, canonical=True)
+        except Exception:
+            return None  # Error during SMILES processing
+
+    # Apply canonicalization to the SMILES column with tqdm progress bar
+    metadata_df["SMILES"] = metadata_df[column].progress_apply(canonicalize_smiles)
+
+    # Filter rows where SMILES is in the valid list and not None
+    filtered_df = metadata_df[
+        metadata_df["SMILES"].isin(valid_canonical_smiles_list)
+    ]
+
+    return filtered_df
 
 counter_ions = [
     "O=S(=O)(O)O",
@@ -31,6 +62,16 @@ counter_ions = [
     "[Br-]",
     "[Na+]",
 ]
+
+
+
+
+
+
+
+
+
+
 
 counter_smiles_set = set(Chem.MolToSmiles(Chem.MolFromSmiles(counter_ion)) for counter_ion in counter_ions)
 

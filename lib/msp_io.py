@@ -265,6 +265,7 @@ def pad_3d_array_with_nan(arrays, max_rows=None):
 # MSP column mappings for parsing and column naming
 msp_column_names = {
     "Name": ["NAME"],
+    "Formula": ["FORMULA"],
     "InChIKey": ["INCHIKEY"],
     "PrecursorMZ": ["Precursor_m/z", "PRECURSORMZ"],
     "PrecursorType": ["Precursor_type", "PRECURSORTYPE"],
@@ -279,6 +280,7 @@ msp_column_names = {
 # Column data types for processing
 msp_column_types = {
     "Name": "str",
+    "Formula": "str",
     "InChIKey": "str",
     "PrecursorMZ": "Float32",
     "PrecursorType": "str",

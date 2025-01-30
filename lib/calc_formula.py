@@ -1,4 +1,5 @@
 import os
+import dill
 from rdkit import Chem
 from rdkit.Chem import Descriptors
 import itertools
@@ -6,7 +7,9 @@ import re
 import bisect
 from collections import defaultdict
 import math
-import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from joblib import Parallel, delayed
+import subprocess
 from tqdm import tqdm
 from tempfile import mkdtemp
 import shutil
@@ -17,7 +20,7 @@ try:
 except ImportError:
     from chem_data import read_adduct_type_data, calc_exact_mass
 
-adduct_type_data = read_adduct_type_data
+adduct_type_data = read_adduct_type_data()
 
 
 
@@ -60,17 +63,55 @@ def generate_possible_fragments(element_counts, unsaturation:int, max_unsaturati
 
     return possible_fragments
 
-# マッチした(mz,intensity, formula)を返す
-def annotate_peak_with_formula(peaks, formula, mol, aduct_type, ppm):
+def annotate_peak_with_formula(peaks, formula, mol, aduct_type, ppm, sn_threshold, min_peak_number, filter_precursor):
+    """
+    Annotate peaks with the molecular formula fragments based on m/z and intensity.
+
+    Args:
+        peaks (list of tuples): 
+            List of peaks, where each peak is a tuple (mass, intensity).
+
+        formula (str): 
+            Molecular formula of the precursor ion.
+
+        mol (rdkit.Chem.Mol): 
+            RDKit Mol object of the precursor.
+
+        aduct_type (str): 
+            Adduct type of the precursor (e.g., "[M+H]+").
+
+        ppm (float): 
+            Mass accuracy tolerance in parts per million (ppm).
+
+        sn_threshold (float): 
+            Signal-to-noise ratio threshold for filtering peaks.
+
+        min_peak_number (int): 
+            The minimum number of annotated peaks required to retain the result. If the number of annotated peaks 
+            (including the precursor peak) is less than `min_peak_number`, the function will return an empty string.
+
+        filter_precursor (bool, optional): 
+            If True, filter out cases where the precursor m/z cannot be assigned the input formula. Default is False.
+
+    Returns:
+        str: 
+            Annotated peaks as a semicolon-separated string, where each annotation is:
+            
+            "mass,intensity,formula,unsaturation,ppm".
+            
+            If the number of annotated peaks is less than `min_peak_number` or precursor filtering is enabled and
+            no formula is assigned to the precursor m/z, the function returns an empty string.
+    """
     aduct_mass = adduct_type_data[aduct_type]['shift']
 
-    # Sort peaks by mass in descending order
+    # Sort peaks by mass in ascending order
     peaks = sorted(peaks, key=lambda x: x[0], reverse=False)
     max_intensity = max([peak[1] for peak in peaks])
 
     # Convert the formula into a dictionary of element counts
     element_counts = formula_to_dict(formula)
-    ppm_threshold = calc_exact_mass(element_counts) * ppm * 1e-6
+    exact_mass = calc_exact_mass(element_counts)
+    ppm_threshold = exact_mass * ppm * 1e-6
 
     # Calculate the unsaturation number for the formula
     unsaturation = calc_unsaturations(element_counts)
@@ -79,31 +120,108 @@ def annotate_peak_with_formula(peaks, formula, mol, aduct_type, ppm):
     possible_fragments = generate_possible_fragments(element_counts, unsaturation=unsaturation)
     fragment_mass_list = [calc_exact_mass(f) for f in possible_fragments]
     fragments_detail, fragment_mass_list = zip(*sorted(zip(possible_fragments, fragment_mass_list), key=lambda x: x[1]))
-    peaks_with_formula = [(calc_exact_mass(element_counts), 1.1, formula, unsaturation, 0.0)]
-    
-    for peak_mass, intensity in peaks:
-        p_idx_l = bisect.bisect_right(fragment_mass_list, peak_mass - aduct_mass - ppm_threshold)
-        p_idx_r = bisect.bisect_left(fragment_mass_list, peak_mass - aduct_mass + ppm_threshold)
-                
-        min_ppm = math.inf
-        min_idx = -1
-        for i in range(p_idx_l, p_idx_r):
-            fragment = fragments_detail[i]
-            ppm = abs(peak_mass - aduct_mass - fragment_mass_list[i]) / ppm_threshold
-            if ppm < min_ppm:
-                min_ppm = ppm
-                min_idx = i
-                match_formula = dict_to_formula(fragment)
-        if min_idx != -1:
-            unsaturation = calc_unsaturations(fragments_detail[min_idx])
-            peaks_with_formula.append((peak_mass, intensity/max_intensity, match_formula, unsaturation, min_ppm))
+    peaks_with_formula1 = [] # peak, intensity version
+    peaks_with_formula2 = [] # intensity, peak version
 
+     # Assign precursor m/z to the input formula
+    precursor_assigned1 = False
+    best_intensity1 = -1  # Initialize best intensity to a low value
+    best_peak_mass1 = None  # Variable to hold the best peak mass
+
+    precursor_assigned2 = False
+    best_intensity2 = -1  # Initialize best intensity to a low value
+    best_peak_mass2 = None  # Variable to hold the best peak mass
+
+    for peak_mass, intensity in peaks:
+        if abs(peak_mass - exact_mass - aduct_mass) < ppm_threshold:
+            if intensity > best_intensity1:  # Select the peak with the highest intensity
+                best_intensity1 = intensity
+                best_peak_mass1 = peak_mass
+                precursor_assigned1 = True
+        
+        peak_mass, intensity = intensity, peak_mass
+        if abs(peak_mass - exact_mass - aduct_mass) < ppm_threshold:
+            if intensity > best_intensity2:  # Select the peak with the highest intensity
+                best_intensity2 = intensity
+                best_peak_mass2 = peak_mass
+                precursor_assigned2 = True
+
+
+    if precursor_assigned1:
+        peaks_with_formula1.append((best_peak_mass1, 1.1, formula, unsaturation, 0.0))
+    if precursor_assigned2:
+        peaks_with_formula2.append((best_peak_mass2, 1.1, formula, unsaturation, 0.0))
+
+    # Filter precursor m/z if required
+    if filter_precursor and not precursor_assigned1 and not precursor_assigned2:
+        return f"ErrorPrecursorIonSpectrumNotFound: {exact_mass+aduct_mass}"
+    if filter_precursor and not precursor_assigned1:
+        peaks_with_formula1 = None
+    if filter_precursor and not precursor_assigned2:
+        peaks_with_formula2 = None
+
+    # Annotate other peaks
+    for peak_mass, intensity in peaks:
+        if peaks_with_formula1 is not None and intensity / max_intensity < sn_threshold:
+            p_idx_l = bisect.bisect_right(fragment_mass_list, peak_mass - aduct_mass - ppm_threshold)
+            p_idx_r = bisect.bisect_left(fragment_mass_list, peak_mass - aduct_mass + ppm_threshold)
+
+            min_ppm = math.inf
+            min_idx = -1
+            for i in range(p_idx_l, p_idx_r):
+                fragment = fragments_detail[i]
+                ppm = abs(peak_mass - aduct_mass - fragment_mass_list[i]) / ppm_threshold
+                if ppm < min_ppm:
+                    min_ppm = ppm
+                    min_idx = i
+                    match_formula = dict_to_formula(fragment)
+
+            if min_idx != -1:
+                unsaturation = calc_unsaturations(fragments_detail[min_idx])
+                peaks_with_formula1.append((peak_mass, intensity / max_intensity, match_formula, unsaturation, min_ppm))
+                
+        peak_mass, intensity = intensity, peak_mass
+        if peaks_with_formula2 is not None and intensity / max_intensity < sn_threshold:
+            p_idx_l = bisect.bisect_right(fragment_mass_list, peak_mass - aduct_mass - ppm_threshold)
+            p_idx_r = bisect.bisect_left(fragment_mass_list, peak_mass - aduct_mass + ppm_threshold)
+
+            min_ppm = math.inf
+            min_idx = -1
+            for i in range(p_idx_l, p_idx_r):
+                fragment = fragments_detail[i]
+                ppm = abs(peak_mass - aduct_mass - fragment_mass_list[i]) / ppm_threshold
+                if ppm < min_ppm:
+                    min_ppm = ppm
+                    min_idx = i
+                    match_formula = dict_to_formula(fragment)
+
+            if min_idx != -1:
+                unsaturation = calc_unsaturations(fragments_detail[min_idx])
+                peaks_with_formula2.append((peak_mass, intensity / max_intensity, match_formula, unsaturation, min_ppm))
+
+    # Verify the formula matches the molecule
     calc_formula = Chem.rdMolDescriptors.CalcMolFormula(mol)
     if formula != calc_formula:
-        raise ValueError(f"Formula mismatch: {formula} != {calc_formula}")
-    
-    return ";".join([",".join([str(peak_mass),str(intensity),formula, str(unsaturation), str(ppm)]) for peak_mass, intensity, formula, unsaturation, ppm in peaks_with_formula])
+        # raise ValueError(f"Formula mismatch: {formula} != {calc_formula}")
+        return f"ErrorFormulaMismatch: {formula} != {calc_formula}"
 
+    if peaks_with_formula1 is None:
+        peaks_with_formula = peaks_with_formula2
+    elif peaks_with_formula2 is None:
+        peaks_with_formula = peaks_with_formula1
+    elif len(peaks_with_formula1) > len(peaks_with_formula2):
+        peaks_with_formula = peaks_with_formula1
+    else:
+        peaks_with_formula = peaks_with_formula2
+
+    if len(peaks_with_formula) < min_peak_number:
+        return f"ErrorInsufficientNumberOfPeaks: {len(peaks_with_formula)} < {min_peak_number}"
+
+    # Return the annotated peaks as a semicolon-separated string
+    return ";".join(
+        [",".join([str(peak_mass), str(intensity), formula, str(unsaturation), str(ppm)])
+         for peak_mass, intensity, formula, unsaturation, ppm in peaks_with_formula]
+    )
 
 
 # 詳しくフラグメントを取得
@@ -177,24 +295,29 @@ def annotate_peak_with_formula_detail(peaks, formula, mol, aduct_type, ppm):
     return fragments
 
 
-def process_batch_file(batch_file, ppm, smiles_column, peaks_column, formula_column, aduct_type_column, mol_list):
+def process_batch_file(batch_file, ppm, sn_threshold, min_peak_number, filter_precursor, smiles_column, peaks_column, formula_column, aduct_type_column, mol_list):
     try:
         # Load the batch file
         batch_df = pd.read_parquet(batch_file)
+
+        assert len(mol_list) == len(batch_df), "Length of mol_list does not match the number of rows in the batch file."
         
         # Annotate the peaks for each row in the batch
         annotated_peaks = []
         for idx, row in batch_df.iterrows():
-            peaks = row[peaks_column]
-            formula = row[formula_column]
-            aduct_type = row[aduct_type_column]
-            
-            # Parse peaks (assumes they are formatted as 'mass,intensity;mass,intensity;...')
-            peaks = [(float(peak_mass), float(intensity)) for peak_mass, intensity in [peak.split(',') for peak in peaks.split(';')]]
-            
-            # Annotate the peaks
-            annotated_peak = annotate_peak_with_formula(peaks=peaks, formula=formula, mol=mol_list[idx], aduct_type=aduct_type, ppm=ppm)
-            annotated_peaks.append(annotated_peak)
+            try:
+                peaks = row[peaks_column]
+                formula = row[formula_column]
+                aduct_type = row[aduct_type_column]
+                
+                # Parse peaks (assumes they are formatted as 'mass,intensity;mass,intensity;...')
+                peaks = [(float(peak_mass), float(intensity)) for peak_mass, intensity in [peak.split(',') for peak in peaks.split(';')]]
+                
+                # Annotate the peaks
+                annotated_peak = annotate_peak_with_formula(peaks=peaks, formula=formula, mol=mol_list[idx], aduct_type=aduct_type, ppm=ppm, sn_threshold=sn_threshold, min_peak_number=min_peak_number, filter_precursor=filter_precursor)
+                annotated_peaks.append(annotated_peak)
+            except Exception as e:
+                annotated_peaks.append(f"ErrorProcessingRow {batch_file} {idx}: {e}")
         
         # Add the annotated peaks to the DataFrame
         batch_df['FormulaPeaks'] = annotated_peaks
@@ -204,52 +327,149 @@ def process_batch_file(batch_file, ppm, smiles_column, peaks_column, formula_col
         return batch_file
 
     except Exception as e:
-        # print(f"Error processing batch file {batch_file}: {e}")
+        print(f"Error processing batch file {batch_file}: {e}")
         return None
 
-def annotate_peak_with_formula_df(spectra_df, ppm, mol_list=None, ncpu=None, batch_size=1000, smiles_column='SMILES', peaks_column='Peak', formula_column='Formula', aduct_type_column='PrecursorType'):
+script_path = '/workspaces/Ms2z/mnt/lib/calc_formula.py'
+def run_in_subprocess(args):
+    command = [
+        "python", script_path, 
+        ]
+    for key, value in args.items():
+        if isinstance(value, bool):
+            if value:
+                command.append(key)
+        else:
+            command.extend([key, str(value)])
+    subprocess.run(command)
+
+def annotate_peak_with_formula_df(spectra_df, ppm, sn_threshold, min_peak_number, filter_precursor, mol_list=None, ncpu=None, batch_size=1000, smiles_column='SMILES', peaks_column='Peak', formula_column='Formula', aduct_type_column='PrecursorType'):
     """
-    Annotates peaks in batches with the formula if the peak's mass is within 10 ppm of any possible fragment's exact mass.
+    Annotates peaks in a DataFrame with their matching molecular formula fragments based on mass accuracy.
     
-    The data is split into batches and processed in parallel. Results are saved to a temporary directory and combined
-    once all processing is finished. The temporary directory is deleted after use.
+    Peaks in each spectrum are matched with possible molecular fragments derived from the given molecular formula.
+    The function processes the data in batches and uses parallel processing to improve efficiency.
+    Annotated peaks are stored in a new column `FormulaPeaks`.
 
     Args:
-        spectra_df (pandas.DataFrame): Dataframe containing the spectra information.
-        ppm (int): The mass tolerance in ppm.
-        mol_list (list): List of RDKit Mol objects corresponding to the SMILES strings in the dataframe.
-        batch_size (int): Size of each batch.
-        ncpu (int, optional): Number of CPU cores to use for parallel processing. If None, it will use all available cores.
+        spectra_df (pandas.DataFrame): 
+            Input DataFrame containing spectra information. The following columns are required:
+            - `smiles_column` (default: "SMILES"): Contains SMILES strings for the molecules.
+            - `peaks_column` (default: "Peak"): Contains peak information in a string format where each peak
+              is represented as "mass,intensity" and peaks are separated by semicolons, e.g.,
+              "41.0399,6.207207;43.0192,49.711712".
+            - `formula_column` (default: "Formula"): Contains the molecular formula for each spectrum.
+            - `aduct_type_column` (default: "PrecursorType"): Specifies the adduct type (e.g., "[M+H]+").
+
+        ppm (int): 
+            The mass accuracy tolerance in parts per million (ppm).
+
+        sn_threshold (float): 
+            Signal-to-noise ratio threshold for filtering peaks. Peaks with intensities below this ratio 
+            (relative to the maximum intensity in the spectrum) will not be annotated.
+
+        min_peak_number (int): 
+            The minimum number of annotated peaks required to retain the result. If the number of annotated peaks
+            (including the precursor peak) is less than this value, the spectrum is excluded, and an empty 
+            result is returned for that spectrum.
+
+        filter_precursor (bool): 
+            If True, spectra are excluded when the precursor m/z cannot be assigned the input molecular formula.
+
+        mol_list (list, optional): 
+            A precomputed list of RDKit Mol objects corresponding to the SMILES strings in the DataFrame.
+            If None, the function will generate the Mol objects from the SMILES strings in `smiles_column`.
+
+        ncpu (int, optional): 
+            The number of CPU cores to use for parallel processing. If None, all available cores will be used.
+
+        batch_size (int, optional): 
+            The number of rows to process in each batch. Default is 1000.
+
+        smiles_column (str, optional): 
+            The name of the column in `spectra_df` containing SMILES strings. Default is "SMILES".
+
+        peaks_column (str, optional): 
+            The name of the column in `spectra_df` containing peak data. Default is "Peak".
+
+        formula_column (str, optional): 
+            The name of the column in `spectra_df` containing molecular formulas. Default is "Formula".
+
+        aduct_type_column (str, optional): 
+            The name of the column in `spectra_df` specifying the precursor type (e.g., "[M+H]+"). Default is "PrecursorType".
 
     Returns:
-        pandas.DataFrame: Dataframe with the annotated peaks.
+        pandas.DataFrame:
+            The input DataFrame with an additional column `FormulaPeaks`. Each entry in `FormulaPeaks` contains a 
+            semicolon-separated string, where each fragment annotation is formatted as:
+            
+            "mass,intensity,formula,unsaturation,ppm"
+            
+            - `mass`: The mass of the fragment (float).
+            - `intensity`: The normalized intensity of the peak (float, relative to the maximum intensity in the spectrum).
+            - `formula`: The molecular formula of the fragment (string).
+            - `unsaturation`: The degree of unsaturation of the fragment (float or int).
+            - `ppm`: The mass error in parts per million (float).
+
+            Example for a single spectrum:
+            ```
+            "41.0399,0.062,CH3,0,0.1;43.0192,0.497,C2H5,0,0.05;..."
+            ```
+
+    Notes:
+        - Peaks are normalized by dividing their intensity by the maximum intensity in the spectrum.
+        - Only peaks within the specified ppm tolerance of a possible fragment mass are annotated.
+        - Spectra with fewer annotated peaks than `min_peak_number` are excluded.
+        - The `filter_precursor` flag determines whether spectra without a valid precursor formula match are excluded.
+        - The function uses temporary files and parallel processing for efficient batch handling. Temporary files 
+          are deleted after processing.
     """
     if mol_list is None:
-        mol_list = [Chem.MolFromSmiles(smiles) for smiles in spectra_df[smiles_column]]
+        mol_list = [Chem.MolFromSmiles(smiles) for smiles in tqdm(spectra_df[smiles_column], total=len(spectra_df), desc="Generating Mol objects")]
 
     # Create a temporary directory for batch processing
     temp_dir = mkdtemp()
+    print(f"Temporary directory: {temp_dir}")
 
     try:
         # Split the DataFrame into batches and save them to the temporary directory
-        batch_files = []
-        for i in range(0, len(spectra_df), batch_size):
+        files = []
+        for i in tqdm(range(0, len(spectra_df), batch_size), desc="Splitting batches"):
             batch_df = spectra_df.iloc[i:i+batch_size]
             batch_file = os.path.join(temp_dir, f'batch_{i}.parquet')
             batch_df.to_parquet(batch_file, index=False)
-            batch_files.append(batch_file)
+
+            batch_mol_list = mol_list[i:i+batch_size]
+            mol_list_file = os.path.join(temp_dir, f'mol_list_{i}.txt')
+            dill.dump(batch_mol_list, open(mol_list_file, 'wb'))
+
+            files.append((batch_file, mol_list_file))
 
         # Process each batch in parallel
-        with concurrent.futures.ProcessPoolExecutor(max_workers=ncpu) as executor:
-            futures = {executor.submit(process_batch_file, batch_file, ppm, smiles_column, peaks_column, formula_column, aduct_type_column, mol_list): batch_file for batch_file in batch_files}
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
-                future.result()  # Wait for all batch processing to complete
+        with ThreadPoolExecutor(max_workers=ncpu) as executor:
+            futures = [executor.submit(run_in_subprocess, {
+                '--batch_file': batch_file,
+                '--mol_list_file': mol_list_file,
+                '--ppm': ppm,
+                '--sn_threshold': sn_threshold,
+                '--min_peak_number': min_peak_number,
+                '--filter_precursor': filter_precursor,
+                '--smiles_column': smiles_column,
+                '--peaks_column': peaks_column,
+                '--formula_column': formula_column,
+                '--aduct_type_column': aduct_type_column,
+            }) for batch_file, mol_list_file in files]
+
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Processing batches"):
+                future.result()
 
         # Combine all the processed batch files into one DataFrame
-        processed_dfs = [pd.read_parquet(batch_file) for batch_file in batch_files]
+        processed_dfs = [pd.read_parquet(batch_file) for batch_file, _ in tqdm(files, desc="Combining results")]
 
         # Concatenate all DataFrames
         final_df = pd.concat(processed_dfs, ignore_index=True)
+
+        # shutil.rmtree(temp_dir)  # Clean up the temporary directory
 
         return final_df
 
@@ -590,7 +810,26 @@ def get_fragments_and_masses(mol, peaks_with_formula, precursor_mz, aduct_type, 
 
 
 if __name__ == '__main__':
-    if False:
+    if True:
+        import argparse
+        parser = argparse.ArgumentParser(description='Annotate peaks with molecular formula fragments')
+        parser.add_argument('--batch_file', type=str, help='Path to the input batch file')
+        parser.add_argument('--mol_list_file', type=str, help='Path to the file containing the list of RDKit Mol objects')
+        parser.add_argument('--ppm', type=int, default=10, help='Mass accuracy tolerance in ppm')
+        parser.add_argument('--sn_threshold', type=float, default=0.2, help='Signal-to-noise ratio threshold')
+        parser.add_argument('--min_peak_number', type=int, default=5, help='Minimum number of annotated peaks')
+        parser.add_argument('--filter_precursor', action='store_true', help='Filter spectra without precursor formula')
+        parser.add_argument('--smiles_column', type=str, default='SMILES', help='Column name for SMILES strings')
+        parser.add_argument('--peaks_column', type=str, default='Peak', help='Column name for peak data')
+        parser.add_argument('--formula_column', type=str, default='Formula', help='Column name for molecular formulas')
+        parser.add_argument('--aduct_type_column', type=str, default='PrecursorType', help='Column name for adduct types')
+
+        args = parser.parse_args()
+
+        mol_list = dill.load(open(args.mol_list_file, 'rb'))
+
+        process_batch_file(args.batch_file, args.ppm, args.sn_threshold, args.min_peak_number, args.filter_precursor, args.smiles_column, args.peaks_column, args.formula_column, args.aduct_type_column, mol_list)
+    elif False:
         # 入力SMILESを指定
         smiles = 'OCC(=CCNC=1N=CNC2=NC=NC21)C'
         peaks = [[ 41.0399  ,   6.207207],
@@ -660,7 +899,7 @@ if __name__ == '__main__':
         print('\nNeutral loss')
         for frag_smiles, frag_mass in fragments_sorted:
             print(f'SMILES: {frag_smiles:30}, Exact Mass: {precursor_mz-frag_mass+aduct_mass:.4f}')
-    elif True:
+    elif False:
         formula = 'C10H13N5O'
         smiles = 'OCC(=CCNC=1N=CNC2=NC=NC21)C'
         peaks = [[ 41.0399  ,   6.207207],
@@ -682,4 +921,6 @@ if __name__ == '__main__':
             [136.0619  ,  41.038038],
             [136.1628  ,   1.571572],
             [148.0621  ,   2.447447]]
-        annotate_peak_with_formula(peaks, formula, smiles, ppm=10, aduct_type="[M+H]+")
+        mol = Chem.MolFromSmiles(smiles)
+        annotated_peaks = annotate_peak_with_formula(peaks, formula, mol, ppm=10, sn_threshold=0.05, min_peak_number=3, aduct_type="[M+H]+", filter_precursor=True)
+        pass

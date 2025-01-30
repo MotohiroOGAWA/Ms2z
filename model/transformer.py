@@ -1,7 +1,308 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .graph_lib import LSTMGraphEmbedding
+from torch_geometric.data import Batch, Data
 import math
+
+
+
+
+class FragEmbeddings(nn.Module):
+    def __init__(self, 
+                 node_dim: int, edge_dim: int,
+                 attached_motif_index_map: torch.Tensor, # (motif_size, attach_size)
+                 bonding_cnt_tensor: torch.Tensor, # (max(attached_motif_index_map))
+                 atom_layer_list: list,
+                 lstm_iterations: int,
+                 bos, pad, unk,
+                 ) -> None:
+        super().__init__()
+        attached_motif_size = torch.max(attached_motif_index_map)+1
+        assert attached_motif_size == bonding_cnt_tensor.size(0), "attached_motif_size and bonding_cnt_tensor size mismatch"
+        assert attached_motif_size == len(atom_layer_list), "attached_motif_size and attached_motif_index_map size mismatch"
+
+        self.node_dim = node_dim
+        self.edge_dim = edge_dim
+        self.motif_size = attached_motif_index_map.size(0)
+        self.att_size = attached_motif_index_map.size(1)
+        self.attached_motif_size = attached_motif_size
+        self.attached_motif_index_map = nn.Parameter(attached_motif_index_map, requires_grad=False)
+        self.bonding_cnt_tensor = nn.Parameter(bonding_cnt_tensor, requires_grad=False)
+        self.max_bonding_cnt = torch.max(bonding_cnt_tensor)
+        # self.atom_layer_list = atom_layer_list
+
+        atom_node_dim = atom_layer_list[3]['x'].size(1)
+        atom_edge_attr_dim = atom_layer_list[3]['edge_attr'].size(1)
+        for i, atom_layer in enumerate(atom_layer_list):
+            if i < 3:
+                continue
+            nodes = atom_layer['x']
+            edges = atom_layer['edge_index']
+            edges_attr = atom_layer['edge_attr']
+            assert nodes.size(1) == atom_node_dim, "atom_node_dim mismatch"
+            if edges_attr.size(0) > 0:
+                assert edges_attr.size(1) == atom_edge_attr_dim, "atom_edge_attr_dim mismatch"
+            else:
+                edges = torch.zeros(2, 1, dtype=edges.dtype)
+                edges_attr = torch.zeros(1, atom_edge_attr_dim, dtype=edges_attr.dtype)
+
+            self.register_buffer(f'atom_layer_x_{i}', nodes)
+            self.register_buffer(f'atom_layer_edge_index_{i}', edges)
+            self.register_buffer(f'atom_layer_edge_attr_{i}', edges_attr)
+        self.atom_node_dim = atom_node_dim
+        self.atom_edge_attr_dim = atom_edge_attr_dim
+
+        self.bos = bos
+        self.pad = pad
+        self.unk = unk
+        self.special_token_embedding = nn.Embedding(3, node_dim)
+
+        self.atom_layer = LSTMGraphEmbedding(
+            node_dim=self.atom_node_dim, edge_dim=self.atom_edge_attr_dim,
+            hidden_dim=node_dim, iterations=lstm_iterations, directed=False,
+        )
+
+        self.edge_linear = nn.Sequential(
+            nn.Linear(self.max_bonding_cnt, edge_dim),
+        )
+
+        self.calc_attached_motif_idx_to_embeddings = {}
+        
+    def forward(self, idx):
+        if idx.size(-1) == 2:
+            # (..., 2) --> (..., node_dim)
+            return self.embed_attached_motif(idx)
+        elif idx.size(-1) == 3:
+            # (..., 3) --> (..., node_dim + edge_dim)
+            node_embeddings = self.embed_attached_motif(idx[..., :2])
+            edge_attr = self.embed_edge_attr(idx)
+            return torch.cat([node_embeddings, edge_attr], dim=-1)
+        else:
+            raise ValueError(f'Invalid input shape: {idx.size()}')
+        
+    def reset_calc_embeddings(self):
+        self.calc_attached_motif_idx_to_embeddings = {}
+
+    def embed_attached_motif(self, idx):
+        # (..., 2) --> (..., node_dim)
+        original_shape = idx.shape[:-1]  
+        flattened_idx = idx.reshape(-1, 2)  # (N, 2)
+
+        # Mask to separate special tokens (0~2) and normal indices
+        special_token_mask = flattened_idx[:, 0] <= 2
+        normal_token_mask = ~special_token_mask
+
+        # Handle special tokens
+        special_tokens = flattened_idx[special_token_mask, 0]  # Extract first column for special tokens
+        special_embeddings = self.special_token_embedding(special_tokens)  # (num_special_tokens, node_dim)
+
+        # Handle normal tokens
+        unique_idx, inverse_indices = torch.unique(flattened_idx[normal_token_mask], dim=0, return_inverse=True)
+
+        cached_embeddings = []
+        new_indices = []
+        for i, idx_tuple in enumerate(unique_idx.tolist()):
+            idx_tuple = tuple(idx_tuple)
+            if idx_tuple in self.calc_attached_motif_idx_to_embeddings:
+                cached_embeddings.append(self.calc_attached_motif_idx_to_embeddings[idx_tuple])
+            else:
+                new_indices.append(i)
+
+        if new_indices:
+            new_unique_idx = unique_idx[new_indices]
+            new_embeddings = self.embed_atom_layer(new_unique_idx)  # (new_size, node_dim)
+
+            for i, idx_tuple in zip(new_indices, new_unique_idx.tolist()):
+                self.calc_attached_motif_idx_to_embeddings[tuple(idx_tuple)] = new_embeddings[i]
+
+            cached_embeddings.extend(new_embeddings)
+
+        normal_embeddings = torch.stack(cached_embeddings, dim=0)  # (unique_datasize, node_dim)
+
+        # Create full embedding tensor
+        full_embeddings = torch.zeros(
+            (flattened_idx.size(0), self.node_dim),  # (N, node_dim)
+            device=idx.device
+        )
+
+        # Assign special and normal embeddings
+        full_embeddings[special_token_mask] = special_embeddings
+        full_embeddings[normal_token_mask] = normal_embeddings[inverse_indices]
+
+        # Reshape back to original shape (..., node_dim)
+        final_embeddings = full_embeddings.view(*original_shape, -1)
+
+        return final_embeddings
+    
+    def embed_edge_attr(self, bond_pos_tensor):
+        """
+        Convert bond position tensor to one-hot encoded edge attributes.
+
+        Args:
+            bond_pos_tensor (torch.Tensor): Tensor of shape (datasize, 3), where each row contains
+                                            (motif_idx, attachment_idx, bond_pos).
+
+        Returns:
+            torch.Tensor: One-hot encoded edge attributes of shape (datasize, max_bonding_cnt).
+        """
+        # Extract motif_idx, attach_idx, and bond_pos
+        motif_idx = bond_pos_tensor[..., 0]
+        attach_idx = bond_pos_tensor[..., 1]
+        bond_pos = bond_pos_tensor[..., 2]
+
+        # Get bonding count for each pair (motif_idx, attach_idx)
+        indices = self.attached_motif_index_map[motif_idx, attach_idx]
+        bond_cnt = self.bonding_cnt_tensor[indices]  # Shape: (datasize,)
+
+        # Create a full tensor filled with -1.0
+        broadcast_shape = (*bond_pos_tensor.shape[:-1], self.max_bonding_cnt)  # (..., max_bonding_cnt)
+        one_hot_tensor = torch.full(
+            broadcast_shape,
+            -1.0,
+            dtype=torch.float32,
+            device=bond_pos_tensor.device
+        )
+
+        # Generate index grid for broadcasting
+        bond_idx_range = torch.arange(self.max_bonding_cnt, device=bond_pos_tensor.device).view(
+            *([1] * (bond_pos_tensor.ndim - 1)), self.max_bonding_cnt
+        )  # Shape: (..., max_bonding_cnt)
+
+        # Create mask for valid positions where bond_cnt is greater than the index
+        mask = bond_idx_range < bond_cnt.unsqueeze(-1)  # Shape: (..., max_bonding_cnt)
+
+        # Fill valid positions with 0.0
+        one_hot_tensor[mask] = 0.0
+
+        # Convert bond_pos to indexing format and set bond positions to 1.0
+        bond_pos_expanded = bond_pos.unsqueeze(-1).expand_as(one_hot_tensor)
+        bond_mask = bond_idx_range == bond_pos_expanded
+        one_hot_tensor[bond_mask] = 1.0
+
+        edge_attr = self.edge_linear(one_hot_tensor) # (datasize, edge_dim)
+
+        return edge_attr
+
+
+    def get_atom_layer(self, idx):
+        """
+        Retrieve a Data object from the registered buffers.
+
+        Args:
+            idx (int): Index of the desired graph.
+
+        Returns:
+            Data: The corresponding Data object reconstructed from buffers.
+        """
+        x = getattr(self, f"atom_layer_x_{idx}")
+        edge_index = getattr(self, f"atom_layer_edge_index_{idx}")
+        edge_attr = getattr(self, f"atom_layer_edge_attr_{idx}")
+        # if edge_attr.numel() == 0:  # Handle empty edge_attr case
+        #     edge_attr = None
+        return Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    
+    def batched_atom_layer(self, idx_tensor):
+        selected_graphs = [self.get_atom_layer(self.attached_motif_index_map[idx[0],idx[1]]) for idx in idx_tensor]
+        batched_data = Batch.from_data_list(selected_graphs)
+        return batched_data
+    
+    def embed_atom_layer(self, idx_tensor):
+        batched_atom_layer = self.batched_atom_layer(idx_tensor)
+        x = self.atom_layer(batched_atom_layer)
+        return x
+    
+
+
+    
+    # def train_all_nodes(self, batch_size, shuffle=True):
+    #     # Get all vocab_ids
+    #     vocab_ids = torch.arange(self.vocab_size, device=self.embedding.weight.device)
+
+    #     # Shuffle vocab_ids if shuffle=True
+    #     if shuffle:
+    #         vocab_ids = vocab_ids[torch.randperm(self.vocab_size, device=vocab_ids.device)]
+
+    #     # Process in batches
+    #     for i in range(0, self.vocab_size, batch_size):
+    #         # Get the current batch of vocab_ids
+    #         batch_ids = vocab_ids[i:i+batch_size]
+            
+    #         # Train the model using the current batch
+    #         fp_loss, formula_loss, special_tokens_loss = self.train_batch_nodes(batch_ids)
+
+    #         # Yield the current batch loss and associated vocab_ids
+    #         yield fp_loss, formula_loss, special_tokens_loss
+    
+    # def train_batch_nodes(self, vocab_ids):
+    #     # Get embeddings for the current batch
+    #     embeddings = self.embedding(vocab_ids)  # (batch_size, node_dim)
+
+    #     return self.calc_node_loss(embeddings, vocab_ids)
+        
+
+    # def calc_node_loss(self, embeddings, vocab_ids):
+    #     fp_loss = self.calc_fp_loss(embeddings, vocab_ids)
+    #     formula_loss = self.calc_formula_loss(embeddings, vocab_ids)
+    #     special_tokens_loss = self.calc_special_tokens_loss(embeddings, vocab_ids)
+
+    #     return fp_loss, formula_loss, special_tokens_loss
+    
+    # def calc_fp_loss(self, embeddings, vocab_ids):
+    #     # Predict fingerprints using the linear layer
+    #     predicted_fp = self.fp_linear(embeddings)  # (batch_size, fp_tensor.size(1))
+
+    #     # Get the true fingerprints for the current batch
+    #     true_fp = self.fp_tensor[vocab_ids]  # (batch_size, fp_tensor.size(1))
+
+    #     # Compute the loss for the current batch
+    #     element_wise_loss  = self.fp_loss_fn(predicted_fp, true_fp)
+
+    #     # Create masks for 0 and 1 in fp_tensor
+    #     zero_mask = (true_fp == 0)  # Shape: [batch_size, fp_size]
+    #     one_mask = (true_fp == 1)  # Shape: [batch_size, fp_size]
+
+    #     # Compute the mean loss for zero_mask and one_mask
+    #     zero_loss_mean = torch.sum(element_wise_loss * zero_mask, dim=1) / (zero_mask.sum(dim=1) + 1e-8)  # Shape: [batch_size]
+    #     one_loss_mean = torch.sum(element_wise_loss * one_mask, dim=1) / (one_mask.sum(dim=1) + 1e-8)    # Shape: [batch_size]
+
+    #     # Compute the final loss as the average of zero_loss_mean and one_loss_mean
+    #     fp_loss = (zero_loss_mean + one_loss_mean).mean()
+
+    #     # Yield the current batch loss and associated vocab_ids
+    #     return fp_loss
+    
+    # def calc_formula_loss(self, embeddings, vocab_ids):
+    #     # Predict formula using the linear layer
+    #     predicted_formula = self.formula_linear(embeddings)  # (batch_size, formula_tensor.size(1))
+
+    #     # Get the true formula for the current batch
+    #     true_formula = self.formula_tensor[vocab_ids]  # (batch_size, formula_tensor.size(1))
+
+    #     # Compute the loss for the current batch
+    #     formula_loss = self.formula_loss_fn(predicted_formula, true_formula)
+
+    #     return formula_loss
+    
+    # def calc_special_tokens_loss(self, embeddings, vocab_ids):
+    #     # Predict special tokens using the linear layer
+    #     predicted_special_tokens = self.special_tokens_linear(embeddings)  # (batch_size, 5)
+        
+    #     # Get the true special tokens for the current batch
+    #     true_special_tokens = self.special_tokens_tensor[vocab_ids]
+
+
+    #     unique_sp_tokens, counts = torch.unique(true_special_tokens, return_counts=True)
+    #     token_weights = (1 / counts.float()) / unique_sp_tokens.size(0)
+    #     weight_map = {token.item(): weight for token, weight in zip(unique_sp_tokens, token_weights)}
+    #     weights = torch.tensor([weight_map[token.item()] for token in true_special_tokens], device=true_special_tokens.device)  # Shape: [data_size]
+
+    #     # Compute the loss for the current batch
+    #     special_tokens_loss = self.special_tokens_loss_fn(predicted_special_tokens, true_special_tokens, reduction='none')
+    #     special_tokens_loss = (special_tokens_loss * weights).sum()
+
+    #     return special_tokens_loss
+
 
 
 class MzEmbeddings(nn.Module):
@@ -18,45 +319,7 @@ class MzEmbeddings(nn.Module):
         embedding = embedding / norm
         embedding = embedding * intensity.unsqueeze(2)
         return embedding
-
-class FragEmbeddings(nn.Module):
-    def __init__(self, embed_dim: int, vocab_size: int, bond_pos_tensor: torch.Tensor) -> None:
-        super().__init__()
-        assert vocab_size+1 == bond_pos_tensor.size(0), "vocab_size and max_bonds size mismatch"
-
-        self.embed_dim = embed_dim
-        self.vocab_size = vocab_size
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-
-        self.max_bond_cnt = bond_pos_tensor.size(1)
-        self.bond_pos_tensors = bond_pos_tensor
-
-        eye_tensor = torch.eye(self.max_bond_cnt, dtype=torch.float32)
-        eye_tensor = torch.cat([eye_tensor, torch.zeros(1, self.max_bond_cnt, dtype=torch.float32)], dim=0)
-        self.one_hot_pos = nn.Parameter(eye_tensor, requires_grad=False)
-
-        self.bond_position_projection  = nn.Linear(self.max_bond_cnt, embed_dim)
-        self.joint_projection = nn.Linear(embed_dim*2, embed_dim)
-
-    def forward(self, idx, root_bond_pos):
-        # (batch, seq_len) --> (batch, seq_len, embed_dim)
-        x = self.calc_embed(idx, root_bond_pos)
-        return x
-    
-    def calc_embed(self, idx_tensor, root_bond_pos_tensor):
-        one_hot = self.bond_pos_tensors[idx_tensor] + self.one_hot_pos[root_bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
-        w = self.bond_position_projection(one_hot) # (batch, seq_len, max_bond_cnt, embed_dim)
-
-        embed = self.embedding(idx_tensor)
-        embed = embed * w
-        return embed
-    
-    def joint_embed(self, idx_tensor, root_bond_pos_tensor, bond_pos_tensor):
-        x = self.calc_embed(idx_tensor, root_bond_pos_tensor)
-        one_hot = self.bond_pos_tensors[idx_tensor] + self.one_hot_pos[bond_pos_tensor] # (batch, seq_len, max_bond_cnt)
-
-
-        
+ 
     
 class Embeddings(nn.Module):
     def __init__(self, vocab_size: int, embed_dim: int, dropout: float = 0.1) -> None:

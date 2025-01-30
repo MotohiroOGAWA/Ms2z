@@ -148,6 +148,14 @@ class Fragment:
 
         return qry_idx_to_tgt_idx_list
 
+    def to_tuple(self):
+        r = []
+        r.append(self.smiles)
+        for frag_bond in self.bond_list:
+            r.append(frag_bond.atom_idx)
+            r.append(frag_bond.token)
+        return tuple(r)
+
     @staticmethod
     def from_tuple(fragment_tuple, atom_map=None):
         smiles = fragment_tuple[0]
